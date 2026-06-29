@@ -1,0 +1,5 @@
+/target
+graal_dumps/
+*.min.java
+*.min.js
+**/code-minimizer-*

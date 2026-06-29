@@ -1,0 +1,247 @@
+//! End-to-end reducer tests for JavaScript and Java fixtures.
+//!
+//! The tests use simple shell commands to simulate two runtimes that differ on
+//! stdout. They still exercise parsing, candidate generation, oracle execution,
+//! rollback, and final output writing.
+
+use std::{fs, time::Duration};
+
+use code_minimizer::{
+    ReduceConfig, ReducerEngine,
+    config::{BuildConfig, DiffMode, PreserveExit, ReducerLimits, ReductionAlgorithm},
+    edit::Edit,
+    lang::{LanguageAdapter, java::JavaAdapter},
+    reducer::candidate::StageKind,
+};
+use tempfile::tempdir;
+
+/// Builds a compact reducer config for fixture tests.
+fn fixture_config(
+    language: &str,
+    input_name: &str,
+    source: &str,
+) -> (tempfile::TempDir, ReduceConfig) {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join(input_name);
+    let output = dir.path().join(format!("{input_name}.min"));
+    fs::write(&input, source).unwrap();
+
+    let config = ReduceConfig::new(
+        language.to_owned(),
+        input,
+        Some(output),
+        "printf A".to_owned(),
+        "printf B".to_owned(),
+        BuildConfig::None,
+        Duration::from_secs(2),
+        1024,
+        1,
+        PreserveExit::SameClass,
+        DiffMode::AnyChannel,
+        false,
+        None,
+        1,
+        ReducerLimits {
+            max_rounds: 3,
+            max_trials: 100,
+        },
+    )
+    .unwrap();
+
+    (dir, config)
+}
+
+#[test]
+fn reduces_javascript_fixture_while_preserving_diff() {
+    let source = r#"
+function unused() {
+  let value = 123;
+  return value;
+}
+function main() {
+  let keep = "still valid";
+  console.log(keep);
+}
+main();
+"#;
+    let (_dir, config) = fixture_config("js", "case.js", source);
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Reducer should shrink the JavaScript fixture"
+    );
+    assert!(
+        minimized.len() < source.len(),
+        "Output file should contain a smaller JavaScript program"
+    );
+}
+
+#[test]
+fn weighted_random_algorithm_reduces_javascript_fixture() {
+    // This fixture is intentionally small and uses shell printf commands for
+    // both sides. It exercises the new scheduler without depending on a real
+    // JavaScript runtime or external compiler.
+    let source = r#"
+function main() {
+  let keep = 1;
+  let removeA = 2;
+  let removeB = 3;
+  console.log(keep);
+}
+main();
+"#;
+    let (_dir, config) = fixture_config("js", "weighted.js", source);
+    let output = config.output_path.clone();
+
+    // Select the experimental algorithm while keeping all oracle semantics the
+    // same as the structured integration tests.
+    let mut config = config.with_algorithm(ReductionAlgorithm::WeightedRandom);
+    config.limits.max_trials = 40;
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Weighted random reducer should shrink the JavaScript fixture"
+    );
+    assert!(
+        minimized.len() < source.len(),
+        "Output file should contain a smaller JavaScript program"
+    );
+}
+
+#[test]
+fn final_blank_line_cleanup_runs_after_structured_algorithm() {
+    let source = "function main() {\n  let keep = 1;\n\n   \n  console.log(keep);\n}\nmain();\n";
+    let (_dir, config) = fixture_config("js", "blank-lines.js", source);
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Reducer should shrink the JavaScript fixture"
+    );
+    assert!(
+        !minimized.lines().any(|line| line.trim().is_empty()),
+        "Final shared cleanup should remove blank and whitespace-only lines"
+    );
+}
+
+#[test]
+fn reduces_java_fixture_while_preserving_diff() {
+    let source = r#"
+import java.util.Arrays;
+public class Test {
+  static int unusedField = 123;
+  static void unused() {
+    int value = 10;
+    value++;
+  }
+  public static void main(String[] args) {
+    int keep = 1;
+    System.out.println(keep);
+  }
+}
+"#;
+    let (_dir, config) = fixture_config("java", "Test.java", source);
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Reducer should shrink the Java fixture"
+    );
+    assert!(
+        minimized.contains("public class Test"),
+        "Java adapter should preserve the public top-level class"
+    );
+    assert!(
+        !minimized.contains("System.out.println(keep);"),
+        "Reducer should delete removable Java output statements before lower-value edits"
+    );
+}
+
+#[test]
+fn java_fixture_generates_high_priority_deletions_for_output_noise() {
+    let source = include_str!("../test_cases/java/Test.java");
+    let adapter = JavaAdapter::new();
+    let parsed = adapter.parse(source, "Test.java").unwrap();
+    let index = adapter.build_index(&parsed).unwrap();
+    let score = code_minimizer::ir::ComplexityScore::compute(&index, source);
+    let candidates = adapter
+        .generate_groups(
+            StageKind::StatementAndSiblingReduction,
+            &parsed,
+            &index,
+            &score,
+        )
+        .unwrap()
+        .into_iter()
+        .flat_map(|group| group.candidates)
+        .collect::<Vec<_>>();
+
+    let output_deletions = candidates
+        .iter()
+        .filter(|candidate| candidate.description == "Delete output statement")
+        .collect::<Vec<_>>();
+
+    assert!(
+        output_deletions.len() >= 20,
+        "The real Java fixture should produce many high-priority output deletion candidates"
+    );
+    assert!(
+        output_deletions
+            .iter()
+            .all(|candidate| candidate.priority > 100),
+        "Every output deletion candidate should have high priority"
+    );
+    assert!(
+        output_deletions
+            .iter()
+            .any(|candidate| match &candidate.edit {
+                Edit::Delete(range) =>
+                    source[range.start..range.end].contains("System.out.println"),
+                _ => false,
+            }),
+        "The real Java fixture should produce a high-priority deletion candidate for System.out.println noise"
+    );
+    assert!(
+        output_deletions
+            .iter()
+            .any(|candidate| match &candidate.edit {
+                Edit::Delete(range) =>
+                    source[range.start..range.end].contains("FuzzerUtils.out.println"),
+                _ => false,
+            }),
+        "The real Java fixture should produce a high-priority deletion candidate for FuzzerUtils.out.println noise"
+    );
+    assert!(
+        output_deletions
+            .iter()
+            .any(|candidate| match &candidate.edit {
+                Edit::Delete(range) => source[range.start..range.end].contains("printStackTrace"),
+                _ => false,
+            }),
+        "The real Java fixture should produce a high-priority deletion candidate for stack trace noise"
+    );
+
+    assert!(
+        output_deletions
+            .iter()
+            .all(|candidate| candidate.estimated_size_delta < 0),
+        "Every output deletion should shrink the source"
+    );
+}
