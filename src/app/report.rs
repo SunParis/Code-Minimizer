@@ -28,6 +28,8 @@ pub struct ReductionSummary {
     pub cache_hits: usize,
     /// Kept workspace directory when `--keep-temp` was used.
     pub kept_temp_dir: Option<PathBuf>,
+    /// Shutdown signal that interrupted reduction, when any.
+    pub interrupted_by_signal: Option<i32>,
 }
 
 /// Full JSON report for one reduction session.
@@ -61,6 +63,10 @@ pub struct ReductionReport {
     pub max_rounds: usize,
     /// Configured maximum oracle trials after baseline validation.
     pub max_trials: usize,
+    /// Configured byte-size stop target, when any.
+    pub stop_size_bytes: Option<usize>,
+    /// Configured original-size percentage stop target, when any.
+    pub stop_size_percent: Option<u32>,
     /// Number of repeated oracle confirmations required for accepted results.
     pub confirm_runs: usize,
     /// Per-command timeout in milliseconds.
@@ -75,6 +81,14 @@ pub struct ReductionReport {
     pub stages: Vec<StageReport>,
     /// Whether the reducer stopped because `--max-trials` was reached.
     pub trial_limit_reached: bool,
+    /// Whether the reducer stopped because a configured size target was reached.
+    pub size_limit_reached: bool,
+    /// Shutdown signal that interrupted reduction, when any.
+    ///
+    /// When present, the output source is the last accepted snapshot already
+    /// validated before the signal, and final confirmation is intentionally
+    /// skipped so shutdown does not start new child processes.
+    pub interrupted_by_signal: Option<i32>,
     /// Workspace directory retained by `--keep-temp`.
     pub kept_temp_dir: Option<PathBuf>,
 }
@@ -90,6 +104,8 @@ impl ReductionReport {
         baseline_diff: OutputDiff,
         max_rounds: usize,
         max_trials: usize,
+        stop_size_bytes: Option<usize>,
+        stop_size_percent: Option<u32>,
         confirm_runs: usize,
         timeout_ms: u128,
         max_output_bytes: usize,
@@ -110,6 +126,8 @@ impl ReductionReport {
             cache_hits: 0,
             max_rounds,
             max_trials,
+            stop_size_bytes,
+            stop_size_percent,
             confirm_runs,
             timeout_ms,
             max_output_bytes,
@@ -117,8 +135,54 @@ impl ReductionReport {
             final_diff: baseline_diff,
             stages: Vec::new(),
             trial_limit_reached: false,
+            size_limit_reached: false,
+            interrupted_by_signal: None,
             kept_temp_dir: None,
         }
+    }
+
+    /// Creates an interrupted report for a session stopped before baseline diff was known.
+    pub fn interrupted_without_baseline(
+        input_path: PathBuf,
+        output_path: PathBuf,
+        language: String,
+        algorithm: String,
+        original_size: usize,
+        max_rounds: usize,
+        max_trials: usize,
+        stop_size_bytes: Option<usize>,
+        stop_size_percent: Option<u32>,
+        confirm_runs: usize,
+        timeout_ms: u128,
+        max_output_bytes: usize,
+        signal: i32,
+    ) -> Self {
+        // A pre-baseline interrupt has no trustworthy A/B diff yet. The report
+        // keeps the normal schema by storing an unsatisfied empty diff and marks
+        // the signal explicitly so consumers can distinguish this from a normal
+        // completed run.
+        let unknown_diff = OutputDiff {
+            stdout_differs: false,
+            stderr_differs: false,
+            exit_differs: false,
+        };
+        let mut report = Self::new(
+            input_path,
+            output_path,
+            language,
+            algorithm,
+            original_size,
+            unknown_diff,
+            max_rounds,
+            max_trials,
+            stop_size_bytes,
+            stop_size_percent,
+            confirm_runs,
+            timeout_ms,
+            max_output_bytes,
+        );
+        report.interrupted_by_signal = Some(signal);
+        report
     }
 
     /// Converts the report into the compact CLI summary.
@@ -132,6 +196,7 @@ impl ReductionReport {
             rejected_trials: self.rejected_trials,
             cache_hits: self.cache_hits,
             kept_temp_dir: self.kept_temp_dir.clone(),
+            interrupted_by_signal: self.interrupted_by_signal,
         }
     }
 }

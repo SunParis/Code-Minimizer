@@ -11,24 +11,24 @@ use std::fs;
 use anyhow::Context;
 
 use crate::{
-    config::ReduceConfig,
+    config::{ReduceConfig, TrialSide},
     ir::{ProgramSnapshot, SnapshotId},
     lang::{LanguageAdapter, adapter_for},
     logging,
     oracle::Oracle,
     reducer::{
         algorithms::algorithm_for,
-        blank_lines::run_final_blank_line_cleanup,
         candidate::StageKind,
         group::{CandidateGroup, ChunkAttempt},
-        grouping::{group_failure_budget, regroup_candidates_by_region, target_for_candidate},
-        ordering::normalize_groups,
-        phase::generate_phase_groups,
-        reporting::write_json_report,
-        state::EngineState,
-        validation::reject_invalid_snapshot,
+        planning::{
+            grouping::{group_failure_budget, regroup_candidates_by_region, target_for_candidate},
+            ordering::normalize_groups,
+            phase::generate_phase_groups,
+        },
+        shared_stages::blank_lines::run_final_blank_line_cleanup,
     },
     report::{ReductionReport, ReductionSummary, StageReport},
+    runner::received_signal,
     workspace::SessionWorkspace,
 };
 
@@ -36,6 +36,9 @@ pub use super::{
     attempt::TrialAttempt,
     context::ReductionContext,
     objective::{SimplificationObjective, candidate_satisfies_stage_objective},
+};
+use super::{
+    reporting::write_json_report, state::EngineState, validation::reject_invalid_snapshot,
 };
 
 /// Coordinates parsing, grouping, oracle checks, acceptance, rollback, and reports.
@@ -49,6 +52,15 @@ impl ReducerEngine {
     pub fn new(config: ReduceConfig) -> anyhow::Result<Self> {
         let adapter = adapter_for(&config.language)?;
         Ok(Self { config, adapter })
+    }
+
+    /// Creates an engine with a custom adapter for reducer unit tests.
+    #[cfg(test)]
+    pub(crate) fn new_with_adapter_for_tests(
+        config: ReduceConfig,
+        adapter: Box<dyn LanguageAdapter>,
+    ) -> Self {
+        Self { config, adapter }
     }
 
     /// Runs the complete reduction workflow and writes the minimized output.
@@ -68,6 +80,14 @@ impl ReducerEngine {
             "current trial directory: {}",
             workspace.current_trial_dir().display()
         ));
+        logging::info(format_args!(
+            "current side A directory: {}",
+            workspace.current_side_dir(TrialSide::A).display()
+        ));
+        logging::info(format_args!(
+            "current side B directory: {}",
+            workspace.current_side_dir(TrialSide::B).display()
+        ));
         workspace.write_accepted(&file_name, &original_source)?;
 
         let oracle = Oracle::new(self.config.clone())?;
@@ -75,7 +95,59 @@ impl ReducerEngine {
             self.build_snapshot(SnapshotId::ROOT, original_source, &file_name)?;
         reject_invalid_snapshot(&initial_snapshot, "Initial parse failed")?;
 
-        let baseline = oracle.establish_baseline(&workspace, &initial_snapshot.source)?;
+        let baseline = match oracle.establish_baseline(&workspace, &initial_snapshot.source) {
+            Ok(baseline) => baseline,
+            Err(error) => {
+                if let Some(signal) = received_signal() {
+                    let report = ReductionReport::interrupted_without_baseline(
+                        self.config.input_path.clone(),
+                        self.config.output_path.clone(),
+                        self.adapter.language_id().to_owned(),
+                        self.config.algorithm.as_str().to_owned(),
+                        original_size,
+                        self.config.limits.max_rounds,
+                        self.config.limits.max_trials,
+                        self.config.limits.stop_size.bytes,
+                        self.config.limits.stop_size.percent,
+                        self.config.confirm_runs,
+                        self.config.timeout.as_millis(),
+                        self.config.max_output_bytes,
+                        signal,
+                    );
+                    return self.finish_interrupted_without_state(
+                        workspace,
+                        &file_name,
+                        &initial_snapshot.source,
+                        report,
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Some(signal) = received_signal() {
+            let mut report = ReductionReport::new(
+                self.config.input_path.clone(),
+                self.config.output_path.clone(),
+                self.adapter.language_id().to_owned(),
+                self.config.algorithm.as_str().to_owned(),
+                original_size,
+                baseline.diff.clone(),
+                self.config.limits.max_rounds,
+                self.config.limits.max_trials,
+                self.config.limits.stop_size.bytes,
+                self.config.limits.stop_size.percent,
+                self.config.confirm_runs,
+                self.config.timeout.as_millis(),
+                self.config.max_output_bytes,
+            );
+            report.interrupted_by_signal = Some(signal);
+            return self.finish_interrupted_without_state(
+                workspace,
+                &file_name,
+                &initial_snapshot.source,
+                report,
+            );
+        }
         logging::info(format_args!(
             "baseline: stdout differs={} stderr differs={} exit differs={}",
             baseline.diff.stdout_differs, baseline.diff.stderr_differs, baseline.diff.exit_differs
@@ -90,6 +162,8 @@ impl ReducerEngine {
             baseline.diff.clone(),
             self.config.limits.max_rounds,
             self.config.limits.max_trials,
+            self.config.limits.stop_size.bytes,
+            self.config.limits.stop_size.percent,
             self.config.confirm_runs,
             self.config.timeout.as_millis(),
             self.config.max_output_bytes,
@@ -108,7 +182,9 @@ impl ReducerEngine {
         ));
         let mut context = ReductionContext::new(self, &workspace, &oracle, &mut state, &mut report);
         algorithm_for(self.config.algorithm).run(&mut context)?;
-        run_final_blank_line_cleanup(&mut context, 1)?;
+        if !context.trial_limit_reached() {
+            run_final_blank_line_cleanup(&mut context, 1)?;
+        }
 
         fs::write(&self.config.output_path, &state.current.source).with_context(|| {
             format!(
@@ -118,12 +194,42 @@ impl ReducerEngine {
         })?;
         workspace.write_accepted(&file_name, &state.current.source)?;
 
-        let final_decision = oracle.evaluate_candidate(
+        if let Some(signal) = state.interrupted_by_signal.or_else(received_signal) {
+            state.interrupted_by_signal = Some(signal);
+            report.interrupted_by_signal = Some(signal);
+            logging::info(format_args!(
+                "skipping final confirmation after shutdown signal {signal}; writing last accepted source"
+            ));
+            return self.finish_report(workspace, state, report);
+        }
+
+        let final_decision = match oracle.evaluate_candidate(
             &workspace,
             &state.current.source,
             state.trial_id.saturating_add(1),
             &state.baseline,
-        )?;
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                if let Some(signal) = received_signal() {
+                    state.interrupted_by_signal = Some(signal);
+                    report.interrupted_by_signal = Some(signal);
+                    logging::info(format_args!(
+                        "shutdown signal {signal} observed during final confirmation; writing last accepted source"
+                    ));
+                    return self.finish_report(workspace, state, report);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            report.interrupted_by_signal = Some(signal);
+            logging::info(format_args!(
+                "shutdown signal {signal} observed during final confirmation; writing last accepted source"
+            ));
+            return self.finish_report(workspace, state, report);
+        }
         if !final_decision.accepted {
             anyhow::bail!(
                 "Final confirmation failed: {}",
@@ -136,6 +242,16 @@ impl ReducerEngine {
             state.final_diff = diff;
         }
 
+        self.finish_report(workspace, state, report)
+    }
+
+    /// Finalizes output metadata and writes the optional JSON report.
+    fn finish_report(
+        &self,
+        workspace: SessionWorkspace,
+        state: EngineState,
+        mut report: ReductionReport,
+    ) -> anyhow::Result<ReductionSummary> {
         let kept_temp_dir = workspace.finish()?;
 
         report.final_size = state.current.source.len();
@@ -144,7 +260,40 @@ impl ReducerEngine {
         report.rejected_trials = state.rejected_total;
         report.cache_hits = state.cache.hits();
         report.final_diff = state.final_diff;
-        report.trial_limit_reached = state.stopped_by_limit;
+        report.trial_limit_reached = state.stopped_by_trial_limit;
+        report.size_limit_reached = state.stopped_by_size_limit;
+        report.interrupted_by_signal = state.interrupted_by_signal;
+        report.kept_temp_dir = kept_temp_dir.clone();
+
+        if let Some(path) = &self.config.json_report_path {
+            write_json_report(path.clone(), &report)?;
+        }
+
+        if let Some(path) = kept_temp_dir {
+            logging::info(format_args!("workspace kept: {}", path.display()));
+        }
+
+        Ok(report.summary())
+    }
+
+    /// Writes the original source and an interrupted report when baseline stopped early.
+    fn finish_interrupted_without_state(
+        &self,
+        workspace: SessionWorkspace,
+        file_name: &str,
+        source: &str,
+        mut report: ReductionReport,
+    ) -> anyhow::Result<ReductionSummary> {
+        fs::write(&self.config.output_path, source).with_context(|| {
+            format!(
+                "Failed to write output source '{}'",
+                self.config.output_path.display()
+            )
+        })?;
+        workspace.write_accepted(file_name, source)?;
+
+        let kept_temp_dir = workspace.finish()?;
+        report.final_size = source.len();
         report.kept_temp_dir = kept_temp_dir.clone();
 
         if let Some(path) = &self.config.json_report_path {
@@ -281,6 +430,9 @@ impl ReducerEngine {
                     state.rejected_total += 1;
                     consecutive_failures += 1;
                 }
+                TrialAttempt::Interrupted => {
+                    return Ok(None);
+                }
                 TrialAttempt::NotSimpler => {
                     report.rejected += 1;
                     state.rejected_total += 1;
@@ -305,5 +457,13 @@ impl ReducerEngine {
     /// Returns true when the configured trial limit has been reached.
     pub(super) fn trial_limit_reached(&self, trial_id: usize) -> bool {
         trial_id >= self.config.limits.max_trials
+    }
+
+    /// Returns true when the accepted source has reached a configured size target.
+    pub(super) fn size_limit_reached(&self, current_size: usize, original_size: usize) -> bool {
+        self.config
+            .limits
+            .stop_size
+            .reached(current_size, original_size)
     }
 }

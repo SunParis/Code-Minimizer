@@ -24,9 +24,12 @@ RUN_B='/usr/lib/jvm/java-25-openjdk/bin/java -ea -esa --add-modules jdk.incubato
 cargo run --manifest-path "${REPO_ROOT}/Cargo.toml" -- reduce \
   --lang java \
   --input "${SCRIPT_DIR}/Test.java" \
-  --output "${SCRIPT_DIR}/Test.min.java" \
+  --output "${SCRIPT_DIR}/Test.min.weighted-random.java" \
   --run-a "${RUN_A}" \
   --run-b "${RUN_B}" \
   --timeout 120s \
   --max-trials 0 \
-  --json-report "${SCRIPT_DIR}/reduction-report.json"
+  --algorithm weighted-random \
+  --stop-size-percent 25 \
+  --json-report "${SCRIPT_DIR}/reduction-report.weighted-random.json"
+

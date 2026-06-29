@@ -188,6 +188,31 @@ impl TrialSide {
     }
 }
 
+/// Optional source-size target that can stop reduction once reached.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SizeStopConfig {
+    /// Stop when the accepted source is at or below this many bytes.
+    pub bytes: Option<usize>,
+    /// Stop when accepted/original size is at or below this percentage.
+    pub percent: Option<u32>,
+}
+
+impl SizeStopConfig {
+    /// Returns true when at least one size target was configured.
+    pub fn is_enabled(&self) -> bool {
+        self.bytes.is_some() || self.percent.is_some()
+    }
+
+    /// Returns true when the current accepted size has reached a configured target.
+    pub fn reached(&self, current_size: usize, original_size: usize) -> bool {
+        self.bytes
+            .is_some_and(|target_bytes| current_size <= target_bytes)
+            || self.percent.is_some_and(|target_percent| {
+                current_size as u128 * 100 <= original_size as u128 * u128::from(target_percent)
+            })
+    }
+}
+
 /// Limits that bound reduction work for practical fuzzing workflows.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReducerLimits {
@@ -195,6 +220,8 @@ pub struct ReducerLimits {
     pub max_rounds: usize,
     /// Maximum oracle trials after the baseline has been established.
     pub max_trials: usize,
+    /// Optional accepted-source size targets that stop further reduction.
+    pub stop_size: SizeStopConfig,
 }
 
 impl Default for ReducerLimits {
@@ -202,6 +229,7 @@ impl Default for ReducerLimits {
         Self {
             max_rounds: 8,
             max_trials: 2_000,
+            stop_size: SizeStopConfig::default(),
         }
     }
 }
@@ -389,6 +417,49 @@ pub fn parse_duration(value: &str) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs(number))
 }
 
+/// Parses a byte-size limit such as `120`, `10KB`, `2MB`, or `1GB`.
+pub fn parse_byte_size(value: &str) -> anyhow::Result<usize> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("Size must not be empty");
+    }
+
+    let split_at = value
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '_'))
+        .unwrap_or(value.len());
+    let (number_text, unit_text) = value.split_at(split_at);
+    if number_text.is_empty() {
+        anyhow::bail!("Size must start with a number");
+    }
+
+    let number = number_text.replace('_', "").parse::<usize>()?;
+    let multiplier = match unit_text.trim().to_ascii_lowercase().as_str() {
+        "" | "b" | "byte" | "bytes" => 1_usize,
+        "k" | "kb" | "kib" => 1024_usize,
+        "m" | "mb" | "mib" => 1024_usize.pow(2),
+        "g" | "gb" | "gib" => 1024_usize.pow(3),
+        _ => anyhow::bail!("Invalid size unit '{unit_text}'. Expected one of: B, KB, MB, GB"),
+    };
+
+    number
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("Size is too large"))
+}
+
+/// Parses a whole-number percentage in the inclusive range 1..=100.
+pub fn parse_size_percent(value: &str) -> anyhow::Result<u32> {
+    let value = value.trim().trim_end_matches('%').trim();
+    if value.is_empty() {
+        anyhow::bail!("Percent must not be empty");
+    }
+
+    let percent = value.parse::<u32>()?;
+    if !(1..=100).contains(&percent) {
+        anyhow::bail!("Percent must be between 1 and 100");
+    }
+    Ok(percent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +475,33 @@ mod tests {
         assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
         assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
         assert_eq!(parse_duration("7").unwrap(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_binary_units() {
+        assert_eq!(parse_byte_size("512").unwrap(), 512);
+        assert_eq!(parse_byte_size("2KB").unwrap(), 2 * 1024);
+        assert_eq!(parse_byte_size("3mb").unwrap(), 3 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1GB").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_percent_accepts_whole_percentages() {
+        assert_eq!(parse_size_percent("50").unwrap(), 50);
+        assert_eq!(parse_size_percent("75%").unwrap(), 75);
+        assert!(parse_size_percent("0").is_err());
+        assert!(parse_size_percent("101").is_err());
+    }
+
+    #[test]
+    fn size_stop_config_matches_byte_or_percent_targets() {
+        let config = SizeStopConfig {
+            bytes: Some(80),
+            percent: Some(50),
+        };
+        assert!(config.reached(80, 1_000));
+        assert!(config.reached(500, 1_000));
+        assert!(!config.reached(501, 1_000));
     }
 
     #[test]

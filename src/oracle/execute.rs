@@ -26,11 +26,7 @@ impl Oracle {
         let side_layout = layout.side(side)?;
         let build = if let Some(template) = self.config.build.command_for_side(side) {
             let command = self.expand_for_side(template, side_layout)?;
-            logging::info(format_args!(
-                "starting side {} build in {}",
-                side.as_label(),
-                side_layout.dir.display()
-            ));
+            logging::info(format_args!("starting side {} build", side.as_label()));
             let started = Instant::now();
             let outcome = self.runner.run(&command, &side_layout.dir)?;
             logging::info(format_args!(
@@ -49,11 +45,7 @@ impl Oracle {
             TrialSide::B => &self.config.run_b,
         };
         let run_command = self.expand_for_side(run_template, side_layout)?;
-        logging::info(format_args!(
-            "starting side {} run in {}",
-            side.as_label(),
-            side_layout.dir.display()
-        ));
+        logging::info(format_args!("starting side {} run", side.as_label()));
         let started = Instant::now();
         let run = self.runner.run(&run_command, &side_layout.dir)?;
         logging::info(format_args!(

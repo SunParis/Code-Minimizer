@@ -4,9 +4,7 @@
 //! parseable but do not improve the active reduction goal. The oracle still
 //! remains the only authority for interestingness.
 
-use crate::ir::ComplexityScore;
-
-use super::candidate::StageKind;
+use crate::{ir::ComplexityScore, reducer::candidate::StageKind};
 
 /// Simplification objective used before expensive oracle execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

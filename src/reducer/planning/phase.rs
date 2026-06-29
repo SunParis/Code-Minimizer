@@ -110,29 +110,39 @@ fn function_groups(snapshot: &ProgramSnapshot) -> Vec<CandidateGroup> {
     });
     let limit = ((functions.len() * 3).div_ceil(4)).max(1);
 
-    functions
+    let mut groups = Vec::new();
+    for function in functions
         .into_iter()
         .take(limit)
         .filter(|function| !function.entry && !function.protected)
-        .filter_map(|function| {
-            let mut candidates = Vec::new();
-            for call_site in &snapshot.analysis.call_sites {
-                if call_site.enclosing_function == Some(function.node) {
-                    continue;
-                }
-                if call_site.callee_name.is_some()
-                    && function.name.is_some()
-                    && call_site.callee_name != function.name
-                {
-                    continue;
-                }
-                candidates.extend(call_site_candidates(
-                    snapshot,
-                    call_site.node,
-                    call_site.context,
+    {
+        let score = function_score(&function).min(500) as i32;
+        let exact_call_sites = exact_external_call_sites(snapshot, &function);
+        if !exact_call_sites.is_empty() {
+            let candidates = exact_call_sites
+                .iter()
+                .flat_map(|call_site| {
+                    call_site_candidates(snapshot, call_site.node, call_site.context)
+                })
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                groups.push(CandidateGroup::new(
+                    format!(
+                        "phase:function-calls:{}",
+                        snapshot.index.nodes[function.node.0].range.start
+                    ),
+                    snapshot.version,
+                    StageKind::AggressiveFunctionElimination,
+                    CandidateGroupKind::DeclarationFamily,
+                    "Neutralize exact external function call sites",
+                    candidates,
+                    GroupStrategy::WholeThenChunksThenSingles,
+                    360 + score,
                 ));
             }
+        }
 
+        if function_declaration_can_be_deleted(snapshot, &function) {
             let decl_node = &snapshot.index.nodes[function.node.0];
             let mut delete = Candidate::new(
                 StageKind::AggressiveFunctionElimination,
@@ -144,22 +154,57 @@ fn function_groups(snapshot: &ProgramSnapshot) -> Vec<CandidateGroup> {
                 -(decl_node.range.len() as isize),
             );
             delete.target = Some(function.node);
-            candidates.push(delete);
+            groups.push(CandidateGroup::new(
+                format!("phase:function-declaration:{}", decl_node.range.start),
+                snapshot.version,
+                StageKind::AggressiveFunctionElimination,
+                CandidateGroupKind::DeclarationFamily,
+                "Delete unreferenced function declaration",
+                vec![delete],
+                GroupStrategy::SinglesOnly,
+                160 + function_score(&function).min(100) as i32,
+            ));
+        }
+    }
 
-            (!candidates.is_empty()).then(|| {
-                CandidateGroup::new(
-                    format!("phase:function:{}", decl_node.range.start),
-                    snapshot.version,
-                    StageKind::AggressiveFunctionElimination,
-                    CandidateGroupKind::DeclarationFamily,
-                    "Remove function call sites and declaration",
-                    candidates,
-                    GroupStrategy::WholeThenChunksThenSingles,
-                    280 + function_score(&function).min(500) as i32,
-                )
-            })
-        })
+    groups
+}
+
+fn exact_external_call_sites(
+    snapshot: &ProgramSnapshot,
+    function: &crate::ir::FunctionSummary,
+) -> Vec<crate::ir::CallSiteSummary> {
+    let Some(function_name) = function.name.as_deref() else {
+        return Vec::new();
+    };
+
+    snapshot
+        .analysis
+        .call_sites
+        .iter()
+        .filter(|call_site| call_site.enclosing_function != Some(function.node))
+        .filter(|call_site| call_site.callee_name.as_deref() == Some(function_name))
+        .cloned()
         .collect()
+}
+
+/// Returns true when deleting a function declaration is worth testing alone.
+///
+/// Declaration deletion is intentionally delayed until there are no exact
+/// external call sites left. The whole-source identifier count is a conservative
+/// extra guard: if the function name still appears outside the declaration, a
+/// standalone declaration deletion is very likely to fail compilation and waste
+/// an oracle trial.
+fn function_declaration_can_be_deleted(
+    snapshot: &ProgramSnapshot,
+    function: &crate::ir::FunctionSummary,
+) -> bool {
+    let Some(function_name) = function.name.as_deref() else {
+        return false;
+    };
+
+    exact_external_call_sites(snapshot, function).is_empty()
+        && count_whole_identifier_occurrences(&snapshot.source, function_name) <= 1
 }
 
 fn call_site_candidates(
@@ -638,6 +683,31 @@ fn node_text(snapshot: &ProgramSnapshot, node: NodeId) -> &str {
     snapshot.source.get(range.start..range.end).unwrap_or("")
 }
 
+fn count_whole_identifier_occurrences(source: &str, name: &str) -> usize {
+    if name.is_empty() {
+        return 0;
+    }
+
+    source
+        .match_indices(name)
+        .filter(|(start, _)| {
+            let end = start + name.len();
+            let before = source[..*start].chars().next_back();
+            let after = source[end..].chars().next();
+            !before.is_some_and(is_identifier_part) && !after.is_some_and(is_identifier_part)
+        })
+        .count()
+}
+
+/// Mirrors Java/JavaScript identifier boundary checks for advisory filtering.
+///
+/// This helper is not a parser. It only prevents obvious substring matches such
+/// as counting `helper` inside `helper2` when deciding whether a declaration is
+/// still referenced.
+fn is_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +765,57 @@ mod tests {
                 .flat_map(|group| &group.candidates)
                 .any(|candidate| candidate.transform == TransformKind::ReplaceCallWithValue),
             "Function stage should generate call replacement candidates"
+        );
+    }
+
+    #[test]
+    fn function_stage_uses_exact_external_call_site_groups() {
+        let snapshot = java_snapshot(
+            "class Test { static int helper(){ return 1; } static int other(){ return 2; } static void f(){ int x = helper(); } }",
+        );
+        let groups = generate_phase_groups(StageKind::AggressiveFunctionElimination, &snapshot);
+        let call_groups = groups
+            .iter()
+            .filter(|group| group.id.0.starts_with("phase:function-calls:"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            call_groups.len(),
+            1,
+            "Only the exactly called helper should receive a call-site group"
+        );
+        assert!(
+            call_groups[0]
+                .candidates
+                .iter()
+                .all(|candidate| candidate.transform != TransformKind::DeleteFunctionDecl),
+            "Call-site groups should not mix in declaration deletion"
+        );
+    }
+
+    #[test]
+    fn function_stage_deletes_only_unreferenced_declarations() {
+        let snapshot = java_snapshot(
+            "class Test { static int helper(){ return 1; } static int other(){ return 2; } static void f(){ int x = helper(); } }",
+        );
+        let groups = generate_phase_groups(StageKind::AggressiveFunctionElimination, &snapshot);
+        let declaration_groups = groups
+            .iter()
+            .filter(|group| group.id.0.starts_with("phase:function-declaration:"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            declaration_groups.iter().any(|group| group
+                .candidates
+                .iter()
+                .any(|candidate| candidate.description == "Delete function declaration")),
+            "The unreferenced function should be tried as a declaration-only group"
+        );
+        assert!(
+            declaration_groups
+                .iter()
+                .all(|group| group.strategy == GroupStrategy::SinglesOnly),
+            "Declaration deletion should be tried one candidate at a time"
         );
     }
 

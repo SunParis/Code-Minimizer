@@ -37,8 +37,22 @@ Exit status is controlled separately by `config::PreserveExit`.
 
 `config::PreserveExit` supports `None`, `SameClass`, and `Exact`.
 
-`config::ReducerLimits` stores `max_rounds` and `max_trials`. The CLI converts a
-user value of `0` to `usize::MAX`, meaning no explicit limit.
+`config::ReducerLimits` stores `max_rounds`, `max_trials`, and an optional
+`SizeStopConfig`. The CLI converts a user value of `0` for rounds/trials to
+`usize::MAX`, meaning no explicit limit.
+
+`config::SizeStopConfig` supports two independent target-size stop conditions:
+
+- `bytes`: stop when the accepted source is at or below this byte count;
+- `percent`: stop when accepted/original size is at or below this whole-number
+  percentage.
+
+If both are configured, reaching either target stops further candidate
+scheduling. Final output writing and final oracle confirmation still run.
+
+`config::parse_byte_size()` accepts plain bytes and `B`, `KB`, `MB`, or `GB`
+suffixes. `config::parse_size_percent()` accepts whole percentages written as
+`50` or `50%`.
 
 `config::ReductionAlgorithm` supports `Structured` and `WeightedRandom`. The CLI
 spells them as `structured` and `weighted-random`.
@@ -83,7 +97,9 @@ children do not block.
 On Unix, command shells are spawned into their own process group. Timeouts send
 SIGTERM to that process group, wait one second, then send SIGKILL. The binary
 also installs Ctrl+C/SIGTERM handlers that apply the same cleanup sequence to
-all active command process groups before exiting.
+all active command process groups. After a shutdown signal, the reducer stops
+starting new child processes and writes the last accepted source plus the
+optional JSON report before exiting with `128 + signal`.
 
 ## Oracle
 
@@ -250,7 +266,10 @@ language-neutral generator fully covers a stage. Concrete adapters can return
 syntax-aware `CandidateGroup` values for the active `StageKind`. The engine also
 augments adapter groups with language-neutral groups for loop-bound shrinking,
 call-site neutralization, block/statement chunks, dead declarations, and literal
-cleanup.
+cleanup. Function call-site neutralization is conservative: only call sites with
+an exact best-effort callee/function-name match are grouped with a function, and
+function declaration deletion is generated later as single-candidate work after
+exact external call sites disappear.
 
 Adapters must not execute commands, compare A/B outputs, manage workspaces, or
 decide final interestingness.
@@ -350,6 +369,10 @@ Group kinds include `Atomic`, `SiblingList`, `DeclarationFamily`,
 attempts. The plan is rebuilt from the current snapshot, so stale ranges are not
 reused after acceptance.
 
+Groups that delete function declarations use `SinglesOnly` scheduling. This
+keeps declaration removal separate from call-site neutralization and avoids
+large mixed chunks whose failures are usually predictable compiler rejections.
+
 ## Reducer Engine
 
 `reducer::engine::ReducerEngine` owns the end-to-end workflow:
@@ -361,18 +384,29 @@ reused after acceptance.
 5. run the selected reducer algorithm;
 6. run the shared final `BlankLineCleanup` stage;
 7. write the minimized output;
-8. run final confirmation;
+8. run final confirmation when no shutdown signal was received;
 9. write an optional JSON report.
+
+If Ctrl+C or SIGTERM arrives, the engine stops scheduling new candidates, skips
+final confirmation, writes the last accepted snapshot to the output path, writes
+the optional JSON report, and returns a summary marked with the received signal.
 
 The engine is language-independent. It only sees `LanguageAdapter`,
 `ProgramSnapshot`, `CandidateGroup`, `EditPlan`, `ComplexityScore`, and oracle
-decisions. The implementation is split so `engine` owns the session lifecycle,
-`context` owns the algorithm-facing API, `trial_runner` owns one candidate
-attempt, `objective` owns pre-oracle simplification checks, and `grouping` owns
-candidate retargeting and regional regrouping. Algorithm implementations live
-under `reducer::algorithms` and use `ReductionContext` to access shared
-candidate generation, oracle trials, accepted-source updates, limit checks, and
-stage report recording.
+decisions. Runtime implementation lives under `reducer::runtime`: `engine` owns
+the session lifecycle, `context` owns the algorithm-facing API, `trial_runner`
+owns one candidate attempt, and `objective` owns pre-oracle simplification
+checks. Candidate data types live under `reducer::model`; candidate planning,
+retargeting, ordering, and regional regrouping live under `reducer::planning`.
+Algorithm implementations live under `reducer::algorithms` and use
+`ReductionContext` to access shared candidate generation, oracle trials,
+accepted-source updates, limit checks, and stage report recording.
+
+Limit checks are centralized in `ReductionContext`. Algorithms call the same
+stop check they use for `max_trials`; it also observes configured size targets
+against the current accepted snapshot. When a size target is reached, algorithms
+stop scheduling new candidates and the engine proceeds to final write and final
+oracle confirmation.
 
 ## Algorithms
 
@@ -424,10 +458,16 @@ compatibility re-export. `report::ReductionReport` is serialized when
 - cache hits;
 - configured `max_rounds`, `max_trials`, `confirm_runs`, `timeout_ms`, and
   `max_output_bytes`;
+- configured `stop_size_bytes` and `stop_size_percent`;
 - baseline and final diff state;
 - per-phase reports;
-- trial-limit status;
+- trial-limit, size-limit, and shutdown-signal status;
 - kept workspace directory when available.
+
+`interrupted_by_signal` is `null` for normal runs. When it is an integer, the
+output source is the last accepted snapshot already validated before shutdown;
+the report may omit final confirmation effects because no new child process is
+started after the signal is observed.
 
 `StageReport` records round, stage, generated candidates, trials, accepted,
 rejected, size before/after, and static runtime-cost total before/after.

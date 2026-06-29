@@ -78,6 +78,9 @@ pub fn run_final_blank_line_cleanup(
                     report.rejected += 1;
                     context.record_rejected_attempt();
                 }
+                TrialAttempt::Interrupted => {
+                    break;
+                }
             }
         }
 

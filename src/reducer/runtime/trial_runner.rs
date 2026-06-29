@@ -13,19 +13,20 @@ use crate::{
     logging,
     oracle::Oracle,
     report::StageReport,
+    runner::received_signal,
     workspace::SessionWorkspace,
 };
 
 use super::{
     attempt::TrialAttempt,
-    candidate::Candidate,
     engine::ReducerEngine,
-    group::CandidateGroup,
-    grouping::edit_for_candidates,
     objective::{SimplificationObjective, candidate_satisfies_objective},
     reporting::score_summary,
     state::EngineState,
     validation::reject_invalid_snapshot,
+};
+use crate::reducer::{
+    candidate::Candidate, group::CandidateGroup, planning::grouping::edit_for_candidates,
 };
 
 impl ReducerEngine {
@@ -42,6 +43,11 @@ impl ReducerEngine {
         attempt_description: &str,
         objective: SimplificationObjective,
     ) -> anyhow::Result<TrialAttempt> {
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            return Ok(TrialAttempt::Interrupted);
+        }
+
         let edit = edit_for_candidates(candidates);
         let candidate_source = match edit.apply(&state.current.source) {
             Ok(candidate_source) if candidate_source != state.current.source => candidate_source,
@@ -89,15 +95,32 @@ impl ReducerEngine {
             });
         }
 
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            return Ok(TrialAttempt::Interrupted);
+        }
         state.trial_id += 1;
         report.trials += 1;
         let current_trial_id = state.trial_id;
-        let decision = oracle.evaluate_candidate(
+        let decision = match oracle.evaluate_candidate(
             workspace,
             &candidate_snapshot.source,
             current_trial_id,
             &state.baseline,
-        )?;
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                if let Some(signal) = received_signal() {
+                    state.interrupted_by_signal = Some(signal);
+                    return Ok(TrialAttempt::Interrupted);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            return Ok(TrialAttempt::Interrupted);
+        }
 
         if decision.accepted {
             if let Some(diff) = decision.diff {

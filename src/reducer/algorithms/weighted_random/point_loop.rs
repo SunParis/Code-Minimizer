@@ -127,6 +127,9 @@ pub(super) fn run_weighted_point_loop(context: &mut ReductionContext<'_>) -> any
                     }
                     rejected_without_accept = rejected_without_accept.saturating_add(1);
                 }
+                TrialAttempt::Interrupted => {
+                    break;
+                }
             }
         }
 

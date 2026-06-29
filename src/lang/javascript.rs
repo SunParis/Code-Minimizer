@@ -80,9 +80,9 @@ fn js_group_config(
     Some(match stage {
         StageKind::AggressiveFunctionElimination => (
             CandidateGroupKind::DeclarationFamily,
-            GroupStrategy::WholeThenChunksThenSingles,
-            280,
-            "JavaScript function and top-level declaration simplifications",
+            GroupStrategy::SinglesOnly,
+            150,
+            "JavaScript unreferenced function and top-level declaration simplifications",
         ),
         StageKind::AggressiveBlockElimination => (
             CandidateGroupKind::ControlPathSet,
@@ -125,18 +125,22 @@ fn js_candidates_for_stage(parsed: &ParsedProgram, stage: StageKind) -> Vec<Cand
             StageKind::AggressiveFunctionElimination
                 if is_js_function_like_declaration(&node.kind) =>
             {
-                push_delete(
-                    &mut candidates,
-                    parsed,
-                    stage,
-                    TransformKind::DeleteFunctionDecl,
-                    node,
-                    "Delete function declaration",
-                    180,
-                );
+                if !should_skip_referenced_declaration(parsed, node) {
+                    push_delete(
+                        &mut candidates,
+                        parsed,
+                        stage,
+                        TransformKind::DeleteFunctionDecl,
+                        node,
+                        "Delete function declaration",
+                        180,
+                    );
+                }
             }
             StageKind::AggressiveFunctionElimination if is_js_top_level_declaration(&node.kind) => {
-                if is_direct_child_of_program(&parsed.root, node) {
+                if is_direct_child_of_program(&parsed.root, node)
+                    && !should_skip_referenced_declaration(parsed, node)
+                {
                     push_delete(
                         &mut candidates,
                         parsed,
@@ -328,6 +332,54 @@ fn candidate_id(transform: TransformKind, node: &NodeSummary, operation: &str) -
         node.range.end,
         operation
     )
+}
+
+/// Returns true when a JavaScript declaration is likely still referenced.
+///
+/// Adapter-level declaration deletion is a late conservative cleanup path. When
+/// a declaration name appears elsewhere as a whole identifier, deleting the
+/// declaration alone usually creates a predictable runtime or reference error,
+/// so the reducer leaves that code for statement/expression stages instead.
+fn should_skip_referenced_declaration(parsed: &ParsedProgram, node: &NodeSummary) -> bool {
+    let Some(name) = declaration_identifier(node, &parsed.source) else {
+        return false;
+    };
+    count_identifier_occurrences(&parsed.source, name) > 1
+}
+
+/// Extracts the primary declared name for simple JavaScript declarations.
+fn declaration_identifier<'a>(node: &'a NodeSummary, source: &'a str) -> Option<&'a str> {
+    find_identifier(node).map(|identifier| identifier.text(source))
+}
+
+/// Finds the first identifier descendant in source order.
+fn find_identifier(node: &NodeSummary) -> Option<&NodeSummary> {
+    if node.kind == "identifier" {
+        return Some(node);
+    }
+    node.children.iter().find_map(find_identifier)
+}
+
+/// Counts whole JavaScript identifier occurrences in source text.
+fn count_identifier_occurrences(source: &str, name: &str) -> usize {
+    if name.is_empty() {
+        return 0;
+    }
+
+    source
+        .match_indices(name)
+        .filter(|(start, _)| {
+            let end = start + name.len();
+            let before = source[..*start].chars().next_back();
+            let after = source[end..].chars().next();
+            !before.is_some_and(is_js_identifier_part) && !after.is_some_and(is_js_identifier_part)
+        })
+        .count()
+}
+
+/// Returns true when a character can be part of a JavaScript identifier.
+fn is_js_identifier_part(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
 /// Returns true for JavaScript function-like declarations.
@@ -524,6 +576,26 @@ mod tests {
         assert!(
             output_candidate.priority > 100,
             "Output statement deletion should be prioritized before ordinary statements"
+        );
+    }
+
+    #[test]
+    fn javascript_function_stage_skips_referenced_functions() {
+        let adapter = JavaScriptAdapter::new();
+        let source = "function helper(){ return 1; }\nfunction main(){ return helper(); }\n";
+        let parsed = adapter.parse(source, "case.js").unwrap();
+        let candidates =
+            candidates_for_stage(&adapter, &parsed, StageKind::AggressiveFunctionElimination);
+
+        assert!(
+            candidates.iter().all(|candidate| {
+                candidate.description != "Delete function declaration"
+                    || !matches!(
+                        &candidate.edit,
+                        Edit::Delete(range) if source[range.start..range.end].contains("function helper")
+                    )
+            }),
+            "Referenced JavaScript functions should not be aggressive declaration-deletion candidates"
         );
     }
 }

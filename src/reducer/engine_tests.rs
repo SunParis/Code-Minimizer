@@ -9,7 +9,7 @@ use std::{fs, time::Duration};
 use tempfile::tempdir;
 
 use crate::{
-    config::{BuildConfig, DiffMode, PreserveExit, ReduceConfig, ReducerLimits},
+    config::{BuildConfig, DiffMode, PreserveExit, ReduceConfig, ReducerLimits, SizeStopConfig},
     edit::{Edit, TextRange},
     ir::{ComplexityScore, ProgramIndex, SnapshotId},
     lang::{LanguageAdapter, ParseDiagnostic, ParsedProgram},
@@ -103,14 +103,12 @@ fn engine_accepts_reducing_candidate_with_custom_adapter() {
         ReducerLimits {
             max_rounds: 2,
             max_trials: 10,
+            stop_size: SizeStopConfig::default(),
         },
     )
     .unwrap();
 
-    let mut engine = ReducerEngine {
-        config,
-        adapter: Box::new(SimpleAdapter),
-    };
+    let mut engine = ReducerEngine::new_with_adapter_for_tests(config, Box::new(SimpleAdapter));
     let summary = engine.reduce().unwrap();
 
     assert_eq!(fs::read_to_string(output).unwrap(), "keep ");

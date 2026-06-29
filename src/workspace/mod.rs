@@ -78,6 +78,11 @@ impl SessionWorkspace {
         self.root.join("trials").join("current")
     }
 
+    /// Returns the fixed working directory reused for one side of the current trial.
+    pub fn current_side_dir(&self, side: TrialSide) -> PathBuf {
+        self.current_trial_dir().join(side.as_dir_name())
+    }
+
     /// Writes the current accepted source for crash inspection and debugging.
     pub fn write_accepted(&self, file_name: &str, source: &str) -> anyhow::Result<PathBuf> {
         let path = self.root.join("accepted").join(file_name);

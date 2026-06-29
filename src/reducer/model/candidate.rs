@@ -101,7 +101,7 @@ impl StageKind {
                 "lower static runtime-cost signals such as loop bounds before broader deletion"
             }
             Self::AggressiveFunctionElimination => {
-                "remove call sites and function-like declarations when the oracle still passes"
+                "neutralize exact function call sites, then try unreferenced function-like declarations"
             }
             Self::AggressiveBlockElimination => {
                 "delete, empty, or unwrap larger control-flow and block regions"

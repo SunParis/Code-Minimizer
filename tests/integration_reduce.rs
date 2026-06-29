@@ -8,7 +8,9 @@ use std::{fs, time::Duration};
 
 use code_minimizer::{
     ReduceConfig, ReducerEngine,
-    config::{BuildConfig, DiffMode, PreserveExit, ReducerLimits, ReductionAlgorithm},
+    config::{
+        BuildConfig, DiffMode, PreserveExit, ReducerLimits, ReductionAlgorithm, SizeStopConfig,
+    },
     edit::Edit,
     lang::{LanguageAdapter, java::JavaAdapter},
     reducer::candidate::StageKind,
@@ -44,6 +46,7 @@ fn fixture_config(
         ReducerLimits {
             max_rounds: 3,
             max_trials: 100,
+            stop_size: SizeStopConfig::default(),
         },
     )
     .unwrap();
@@ -134,6 +137,69 @@ fn final_blank_line_cleanup_runs_after_structured_algorithm() {
     assert!(
         !minimized.lines().any(|line| line.trim().is_empty()),
         "Final shared cleanup should remove blank and whitespace-only lines"
+    );
+}
+
+#[test]
+fn size_stop_target_stops_after_reaching_requested_bytes() {
+    let source = r#"
+function unused() {
+  let value = 123;
+  return value;
+}
+function main() {
+  let keep = "still valid";
+  console.log(keep);
+}
+main();
+"#;
+    let (_dir, mut config) = fixture_config("js", "size-stop.js", source);
+    config.limits.stop_size = SizeStopConfig {
+        bytes: Some(source.len().saturating_sub(1)),
+        percent: None,
+    };
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Reducer should shrink at least once before the size stop target is reached"
+    );
+    assert_eq!(
+        summary.final_size,
+        minimized.len(),
+        "Summary size should match the written output"
+    );
+}
+
+#[test]
+fn size_stop_percent_stops_after_reaching_original_size_ratio() {
+    let source = r#"
+function unused() {
+  let value = 123;
+  return value;
+}
+function main() {
+  let keep = "still valid";
+  console.log(keep);
+}
+main();
+"#;
+    let (_dir, mut config) = fixture_config("js", "size-stop-percent.js", source);
+    config.limits.stop_size = SizeStopConfig {
+        bytes: None,
+        percent: Some(99),
+    };
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+
+    assert!(
+        summary.final_size * 100 <= summary.original_size * 99,
+        "Reducer should stop only after reaching the configured size percentage"
     );
 }
 

@@ -12,7 +12,10 @@ mod signals;
 
 pub use outcome::{CommandOutcome, ExitStatusClass, ExitStatusSummary, InvocationOutcome};
 pub use process::CommandRunner;
-pub use signals::{install_signal_handlers, terminate_active_processes_for_shutdown};
+pub use signals::{
+    install_signal_handlers, received_signal, signal_exit_code,
+    terminate_active_processes_for_shutdown,
+};
 
 #[cfg(test)]
 mod tests {

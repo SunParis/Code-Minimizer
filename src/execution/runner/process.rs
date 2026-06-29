@@ -16,7 +16,9 @@ use wait_timeout::ChildExt;
 use super::{
     outcome::{CommandOutcome, ExitStatusSummary},
     output::{CapturedOutput, join_reader, read_limited},
-    signals::{ActiveProcessGuard, configure_child_process_group, terminate_child},
+    signals::{
+        ActiveProcessGuard, configure_child_process_group, received_signal, terminate_child,
+    },
 };
 
 /// Blocking shell-command runner.
@@ -37,6 +39,10 @@ impl CommandRunner {
 
     /// Executes a command through `sh -c` in the provided working directory.
     pub fn run(&self, command: &str, cwd: &Path) -> anyhow::Result<CommandOutcome> {
+        if let Some(signal) = received_signal() {
+            anyhow::bail!("Shutdown signal {signal} received before command start");
+        }
+
         let started = Instant::now();
         let mut command_builder = Command::new("sh");
         command_builder
@@ -53,6 +59,10 @@ impl CommandRunner {
             .map_err(|error| anyhow::anyhow!("Failed to start command '{command}': {error}"))?;
         let child_pid = child.id();
         let _process_guard = ActiveProcessGuard::register(child_pid);
+        if let Some(signal) = received_signal() {
+            terminate_child(&mut child, child_pid)?;
+            anyhow::bail!("Shutdown signal {signal} received after command start");
+        }
 
         let stdout = child
             .stdout

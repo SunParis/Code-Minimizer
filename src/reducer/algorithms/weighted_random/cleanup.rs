@@ -76,6 +76,9 @@ pub(super) fn run_single_candidate_sweep(
                         report.rejected += 1;
                         context.record_rejected_attempt();
                     }
+                    TrialAttempt::Interrupted => {
+                        break 'groups;
+                    }
                 }
             }
         }

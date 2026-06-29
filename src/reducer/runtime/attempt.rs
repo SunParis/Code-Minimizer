@@ -30,4 +30,9 @@ pub enum TrialAttempt {
     InvalidEdit,
     /// Candidate parsed but did not satisfy the requested simplification objective.
     NotSimpler,
+    /// A shutdown signal interrupted the active or next oracle trial.
+    ///
+    /// This is not a rejection of the candidate. The engine will stop scheduling
+    /// new work and write the last accepted snapshot plus an interrupted report.
+    Interrupted,
 }

@@ -123,6 +123,12 @@ through `sh -c`.
   for no explicit trial limit.
 - `--max-rounds <n>` bounds fixed-point stage rounds. Use `0` for no explicit
   round limit.
+- `--stop-size <size>` stops further reduction once the accepted source is at
+  or below the requested size. Plain numbers are bytes; `B`, `KB`, `MB`, and
+  `GB` suffixes are accepted.
+- `--stop-size-percent <n>` stops further reduction once the accepted source is
+  at or below `n` percent of the original source size. Values may be written as
+  `50` or `50%`.
 - `--algorithm <name>` selects the reducer algorithm. `structured` is the
   deterministic staged reducer and remains the default. `weighted-random`
   samples deletable statement points by adaptive weights, then runs cleanup and
@@ -150,6 +156,12 @@ Node ids, symbol ids, candidate ids, and byte ranges are valid only inside the
 snapshot that created them. After any accepted edit, the reducer rebuilds the
 snapshot before generating more candidates.
 
+Reducer limits are checked against the current accepted snapshot. `--max-trials`
+limits oracle work, while `--stop-size` and `--stop-size-percent` are optional
+target-size stop conditions. If any configured size target is reached, the
+reducer stops scheduling new candidates, writes the current accepted source, and
+still runs the final oracle confirmation.
+
 The reducer has pluggable scheduling algorithms. The default `structured`
 algorithm runs fixed-point stages in this order:
 
@@ -166,6 +178,14 @@ size happens to stay unchanged. The final sweep forces single-candidate attempts
 across the enabled stages. If it accepts anything, it reparses and restarts the
 sweep. When the sweep accepts nothing, the output is one-minimal for the current
 candidate generator.
+
+`AggressiveFunctionElimination` is deliberately split into safer sub-steps.
+Call-site neutralization groups contain only external call sites whose
+best-effort callee name exactly matches the target function name. Unknown
+callees are left for later statement/expression stages instead of being tried
+against every function. Function declarations are tried later as declaration-only
+single-candidate groups, and only when no exact external call site remains and
+the function name no longer appears elsewhere as a whole identifier.
 
 After the selected algorithm finishes, the engine always runs `BlankLineCleanup`
 as the last stage. It tries to delete blank and whitespace-only lines one at a
@@ -209,22 +229,25 @@ directory. Full candidate sources are kept only in the fixed
 historical diff under `history/`.
 
 Reducer log lines are prefixed with local time in `[YYYY-MM-DD HH:MM:SS]`
-format. The reducer prints the fixed current trial directory once at startup.
+format. The reducer prints the fixed current trial directory and side A/B
+working directories once at startup; per-trial build/run start logs then omit
+those repeated paths.
 Rejection logs use readable phase names plus stable enum names, and include the
 group, attempt, candidate count, and oracle reason.
 
 ## Java and JavaScript Support
 
-JavaScript candidates include comment cleanup, output-call deletion, top-level
-declaration deletion, declaration deletion, block and statement reduction,
-control-flow replacement, expression replacement, literal shrinking, and cleanup
-edits.
+JavaScript candidates include comment cleanup, output-call deletion,
+conservative function/top-level declaration deletion, block and statement
+reduction, control-flow replacement, expression replacement, literal shrinking,
+and cleanup edits.
 
-Java candidates include comment cleanup, import deletion, member and local
-declaration deletion, output-call deletion, block and method-body replacement,
-control-flow replacement, expression replacement, literal shrinking, empty
-nested block deletion, and cleanup edits. The Java adapter protects the only
-public top-level class by default.
+Java candidates include comment cleanup, import deletion, conservative function
+and type declaration deletion, member and local declaration deletion,
+output-call deletion, block and method-body replacement, control-flow
+replacement, expression replacement, literal shrinking, empty nested block
+deletion, and cleanup edits. The Java adapter protects the only public top-level
+class by default.
 
 Output noise is prioritized. Java `System.out.print*`, `System.err.print*`,
 `java.lang.System.out/err.print*`, and `printStackTrace(System.out/System.err)`
@@ -247,7 +270,9 @@ similarly.
   statistics;
 - configured `max_rounds`, `max_trials`, `confirm_runs`, `timeout_ms`, and
   `max_output_bytes`;
-- whether the trial limit stopped reduction;
+- configured stop-size byte and percentage targets;
+- whether the trial limit, a size target, or a shutdown signal stopped
+  reduction;
 - the kept workspace directory when `--keep-temp` is used.
 
 All human-readable report strings are English.
@@ -262,8 +287,11 @@ Each trial uses separate A and B side directories so build artifacts do not
 cross-contaminate. Commands should write only under `{dir}` or `{output}`.
 
 On Ctrl+C or SIGTERM, Code Minimizer sends SIGTERM to active command process
-groups, waits one second, then sends SIGKILL before exiting. Per-command
-timeouts use the same cleanup sequence.
+groups, waits one second, then sends SIGKILL. It then writes the last accepted
+source and optional JSON report before exiting with the conventional
+signal-based status code. Final confirmation is skipped in this interrupted
+path so shutdown does not start new child processes. Per-command timeouts use
+the same child cleanup sequence.
 
 ## Testing
 

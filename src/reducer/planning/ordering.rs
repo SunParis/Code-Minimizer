@@ -5,8 +5,10 @@
 
 use std::collections::HashSet;
 
-use super::{candidate::Candidate, group::CandidateGroup};
-use crate::edit::Edit;
+use crate::{
+    edit::Edit,
+    reducer::{candidate::Candidate, group::CandidateGroup},
+};
 
 /// Removes duplicate edits and orders high-value candidates first.
 pub fn normalize_candidates(mut candidates: Vec<Candidate>) -> Vec<Candidate> {

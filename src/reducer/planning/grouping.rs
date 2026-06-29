@@ -7,15 +7,14 @@
 use crate::{
     edit::{Edit, TextRange},
     ir::{NodeId, ProgramIndex},
-};
-
-use super::{
-    candidate::{Candidate, StageKind, TransformKind},
-    group::{CandidateGroup, CandidateGroupKind, GroupStrategy},
+    reducer::{
+        candidate::{Candidate, StageKind, TransformKind},
+        group::{CandidateGroup, CandidateGroupKind, GroupStrategy},
+    },
 };
 
 /// Builds the low-level edit for a chunk of candidates.
-pub(super) fn edit_for_candidates(candidates: &[Candidate]) -> Edit {
+pub(crate) fn edit_for_candidates(candidates: &[Candidate]) -> Edit {
     if candidates.len() == 1 {
         candidates[0].plan.as_edit()
     } else {
@@ -29,7 +28,7 @@ pub(super) fn edit_for_candidates(candidates: &[Candidate]) -> Edit {
 }
 
 /// Finds the smallest indexed node covered by a candidate edit.
-pub(super) fn target_for_candidate(candidate: &Candidate, index: &ProgramIndex) -> Option<NodeId> {
+pub(crate) fn target_for_candidate(candidate: &Candidate, index: &ProgramIndex) -> Option<NodeId> {
     let range = candidate_edit_range(candidate)?;
     index
         .nodes
@@ -62,7 +61,7 @@ fn collect_edit_ranges(edit: &Edit, ranges: &mut Vec<TextRange>) {
 }
 
 /// Splits large adapter groups into smaller structure-region groups.
-pub(super) fn regroup_candidates_by_region(
+pub(crate) fn regroup_candidates_by_region(
     stage: StageKind,
     groups: Vec<CandidateGroup>,
     index: &ProgramIndex,
@@ -161,7 +160,7 @@ fn group_kind_for_split(stage: StageKind, fallback: CandidateGroupKind) -> Candi
 }
 
 /// Bounds how long one structurally difficult group can monopolize a stage.
-pub(super) fn group_failure_budget(group: &CandidateGroup) -> usize {
+pub(crate) fn group_failure_budget(group: &CandidateGroup) -> usize {
     match group.stage {
         StageKind::RuntimeCostReduction => 1,
         StageKind::AggressiveFunctionElimination => 16,

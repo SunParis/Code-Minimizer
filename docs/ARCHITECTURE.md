@@ -50,8 +50,9 @@ CLI
   application and `output_diff` comparison/normalization.
 - `ir` stores snapshot-local nodes, indexes, dependency summaries, sibling
   lists, and complexity scores.
-- `reducer` owns pluggable algorithms, candidate grouping, chunk schedules,
-  acceptance, rollback, cache use, and final sweeps.
+- `reducer` owns pluggable algorithms, shared runtime services, candidate
+  planning/model types, acceptance, rollback, cache use, and shared finishing
+  stages.
 - `lang` owns parsing, tree-sitter conversion, index construction, candidate
   generation, and language-local normalization.
 
@@ -59,18 +60,25 @@ The crate root keeps compatibility re-exports such as `config`, `runner`,
 `oracle`, `edit`, `output_diff`, and `report`, but implementation files live in
 the responsibility-oriented directories above.
 
-Within `reducer`, shared mechanics are also separated by responsibility:
+Within `reducer`, shared mechanics are separated by responsibility:
 
-- `engine` owns the end-to-end session lifecycle.
-- `context` is the algorithm-facing service API.
-- `trial_runner` owns one candidate attempt path.
-- `objective` owns pre-oracle simplification checks.
-- `grouping` owns candidate retargeting, edit extraction, and regional
-  regrouping.
-- `state`, `attempt`, `cache`, `reporting`, and `validation` hold focused
-  session state and helper types.
-- `algorithms/structured` and `algorithms/weighted_random/*` contain only
-  scheduling policy.
+- `runtime/` owns the end-to-end engine, algorithm-facing context, candidate
+  trial runner, pre-oracle objectives, cache, state, reporting, and validation.
+- `model/` owns reducer data types: candidates, edit plans, groups, strategies,
+  and trial records.
+- `planning/` owns language-neutral candidate planning, ddmin chunking,
+  ordering, edit extraction, retargeting, and regional regrouping.
+- `shared_stages/` owns final stages that every algorithm runs, currently
+  validated blank-line cleanup.
+- `algorithms/structured/` contains the deterministic staged scheduler split
+  into fixed-point rounds, one stage invocation, final sweep, and stage-order
+  helpers.
+- `algorithms/weighted_random/` contains the adaptive random scheduler split by
+  point collection, weighted sampling, PRNG, cleanup sweeps, and rename sweeps.
+
+Compatibility modules such as `reducer::candidate`, `reducer::engine`, and
+`reducer::phase` re-export the main public types/functions from these
+subdirectories so existing API paths remain stable.
 
 ## Core Invariants
 
@@ -78,6 +86,8 @@ Within `reducer`, shared mechanics are also separated by responsibility:
 - The current accepted source is the only source that can advance reduction.
 - Each accepted source is represented by a fresh `ProgramSnapshot`.
 - Snapshot-local ids and byte ranges are never reused after acceptance.
+- Optional size stop targets are checked only against the current accepted
+  source, never against rejected candidates.
 - Candidate source must parse without diagnostics before oracle execution.
 - Candidates must satisfy the active stage objective before oracle execution:
   structural phases require lower complexity, while `RuntimeCostReduction` can
@@ -125,10 +135,11 @@ code-minimizer-*/
 ```
 
 `trials/current` is reused for baseline confirmations, candidate trials, and
-final confirmation. It is printed once at session startup. Full candidate source
-files are kept only for the current A/B inputs and the last accepted source.
-Each attempt also writes `trials/current/current.diff` plus a historical
-`history/<trial>.diff` record against the last accepted source.
+final confirmation. The current trial directory and its fixed side A/B working
+directories are printed once at session startup. Full candidate source files are
+kept only for the current A/B inputs and the last accepted source. Each attempt
+also writes `trials/current/current.diff` plus a historical `history/<trial>.diff`
+record against the last accepted source.
 
 The workspace is removed when reduction finishes unless `--keep-temp` is used.
 Placing it next to the output file avoids large active trial trees in the system
@@ -160,7 +171,8 @@ directory names out of the interestingness decision.
 
 Candidate trials execute side A first, then side B. Progress logs show when A
 starts, when A finishes with elapsed time, when B starts, and when B finishes
-with elapsed time.
+with elapsed time. Because the side directories are fixed and printed once at
+startup, per-attempt start lines do not repeat their paths.
 
 ## Reducer Algorithms
 
@@ -170,8 +182,10 @@ generation, oracle execution, cache use, accepted-source writes, and report
 updates are exposed through `reducer::context::ReductionContext` and re-exported
 through `reducer::engine::ReductionContext` for compatibility.
 
-The `structured` algorithm is the default deterministic reducer. It is the
-original staged flow and is described below.
+The `structured` algorithm is the default deterministic reducer. Its directory
+contains `fixed_point` for normal stage rounds, `stage` for one regenerated
+stage loop, `final_sweep` for one-candidate cleanup, and `stage_order` for the
+final sweep's stage list. It is described below.
 
 The `weighted-random` algorithm is experimental and split by behavior:
 `point_loop` owns adaptive random sampling, `points` converts generated
@@ -186,6 +200,11 @@ neighbor weights. Accepted deletions rebuild the snapshot and increase nearby
 weights with distance decay. The loop stops after a patience limit based on the
 remaining point count, then runs single-candidate cleanup, conservative
 long-name rename passes.
+
+All algorithms use `ReductionContext` for stop checks. The same check covers
+`--max-trials`, `--stop-size`, and `--stop-size-percent`. When a size target is
+reached, the algorithm stops requesting more candidates; the engine still writes
+the current accepted source and performs final oracle confirmation.
 
 ## Structured Stages
 
@@ -221,8 +240,12 @@ Phase responsibilities:
   size, nested loops, calls, outputs, and depth. It generates deterministic
   loop-bound shrink candidates before more expensive structural phases.
 - `AggressiveFunctionElimination` works on function summaries and call sites. It
-  can replace calls with deterministic default values, remove standalone call
-  statements, and delete function declarations when the oracle allows it.
+  first neutralizes only exact external call sites whose best-effort callee name
+  matches the target function name. Unknown callees are not attached to every
+  function; they remain available to later statement and expression stages.
+  Function declarations are tried as later declaration-only single candidates
+  only when exact external call sites are gone and the name no longer appears
+  elsewhere as a whole identifier.
 - `AggressiveBlockElimination` tries whole owner-construct deletion, minimal or
   empty block bodies, and block unwrapping.
 - `StatementAndSiblingReduction` works on statement sibling lists. It schedules
@@ -269,6 +292,10 @@ Chunk plans try larger edits first where appropriate:
 - chunk complements;
 - sliding windows for long statement lists;
 - single candidates.
+
+Function declaration deletion is an exception to broad chunking. It uses
+single-candidate groups so the reducer does not repeatedly test mixed
+call-site/declaration chunks that are likely to fail compilation.
 
 The final sweep overrides chunk plans and tries single candidates only. If any
 single candidate is accepted, the sweep reparses the source and starts over.
@@ -332,9 +359,11 @@ diffs when the A/B output difference is lost.
 Build and run commands are spawned in their own Unix process group. On Ctrl+C or
 SIGTERM, the main process sends SIGTERM to every active command process group,
 waits one second, sends SIGKILL to anything still present in those groups, and
-then exits with the conventional signal-based status code. Command timeouts use
-the same SIGTERM, one-second wait, then SIGKILL sequence for the timed-out
-process group.
+then lets the reducer finish graceful output. The reducer does not start new
+child processes after observing the signal; it writes the last accepted source
+and optional JSON report, skips final confirmation, and exits with the
+conventional signal-based status code. Command timeouts use the same SIGTERM,
+one-second wait, then SIGKILL sequence for the timed-out process group.
 
 ## Rollback Strategy
 

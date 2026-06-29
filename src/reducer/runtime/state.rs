@@ -34,7 +34,11 @@ pub(super) struct EngineState {
     /// Latest known diff state for the current accepted source.
     pub(super) final_diff: OutputDiff,
     /// True when the configured max-trials limit stopped reduction.
-    pub(super) stopped_by_limit: bool,
+    pub(super) stopped_by_trial_limit: bool,
+    /// True when a configured accepted-source size target stopped reduction.
+    pub(super) stopped_by_size_limit: bool,
+    /// Shutdown signal that stopped reduction after child-process cleanup.
+    pub(super) interrupted_by_signal: Option<i32>,
 }
 
 impl EngineState {
@@ -59,7 +63,9 @@ impl EngineState {
             accepted_total: 0,
             rejected_total: 0,
             final_diff,
-            stopped_by_limit: false,
+            stopped_by_trial_limit: false,
+            stopped_by_size_limit: false,
+            interrupted_by_signal: None,
         }
     }
 }

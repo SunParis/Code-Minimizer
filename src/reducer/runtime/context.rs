@@ -10,17 +10,17 @@ use crate::{
     ir::{ProgramSnapshot, SnapshotId},
     oracle::Oracle,
     report::{ReductionReport, StageReport},
+    runner::received_signal,
     workspace::SessionWorkspace,
 };
 
 use super::{
-    attempt::TrialAttempt,
+    attempt::TrialAttempt, engine::ReducerEngine, objective::SimplificationObjective,
+    state::EngineState, validation::reject_invalid_snapshot,
+};
+use crate::reducer::{
     candidate::{Candidate, StageKind},
-    engine::ReducerEngine,
     group::CandidateGroup,
-    objective::SimplificationObjective,
-    state::EngineState,
-    validation::reject_invalid_snapshot,
 };
 
 /// Shared reducer services available to concrete reduction algorithms.
@@ -79,20 +79,59 @@ impl<'a> ReductionContext<'a> {
 
     /// Returns true when no further oracle trials should be attempted.
     pub fn trial_limit_reached(&mut self) -> bool {
-        // The engine stores the raw trial counter; the context translates it
-        // into an algorithm-facing stop signal and records that the limit was
-        // responsible for termination.
-        if self.engine.trial_limit_reached(self.state.trial_id) {
-            self.state.stopped_by_limit = true;
-            true
-        } else {
-            false
+        // The engine stores raw counters and configured targets; the context
+        // translates them into an algorithm-facing stop signal and records which
+        // configured limit was responsible for termination.
+        if let Some(signal) = self.state.interrupted_by_signal {
+            self.record_signal_interrupt(signal);
+            return true;
         }
+
+        if let Some(signal) = received_signal() {
+            self.record_signal_interrupt(signal);
+            return true;
+        }
+
+        if self.engine.trial_limit_reached(self.state.trial_id) {
+            self.state.stopped_by_trial_limit = true;
+            return true;
+        }
+
+        if self
+            .engine
+            .size_limit_reached(self.state.current.source.len(), self.report.original_size)
+        {
+            if !self.state.stopped_by_size_limit {
+                log_size_limit_reached(
+                    self.state.current.source.len(),
+                    self.report.original_size,
+                    self.engine.config.limits.stop_size.bytes,
+                    self.engine.config.limits.stop_size.percent,
+                );
+            }
+            self.state.stopped_by_size_limit = true;
+            return true;
+        }
+
+        false
     }
 
-    /// Returns whether the configured max-trial bound stopped the algorithm.
+    /// Returns whether any configured reducer bound stopped the algorithm.
     pub fn stopped_by_limit(&self) -> bool {
-        self.state.stopped_by_limit
+        self.state.stopped_by_trial_limit
+            || self.state.stopped_by_size_limit
+            || self.state.interrupted_by_signal.is_some()
+    }
+
+    /// Records a shutdown signal exactly once in state and the in-progress report.
+    fn record_signal_interrupt(&mut self, signal: i32) {
+        if self.state.interrupted_by_signal.is_none() {
+            crate::logging::info(format_args!(
+                "shutdown signal {signal} observed; stopping reduction and writing current accepted source"
+            ));
+        }
+        self.state.interrupted_by_signal = Some(signal);
+        self.report.interrupted_by_signal = Some(signal);
     }
 
     /// Adds one stage report to the session report.
@@ -204,4 +243,23 @@ impl<'a> ReductionContext<'a> {
         // candidates while still using the configured language adapter.
         self.engine.build_snapshot(version, source, file_name)
     }
+}
+
+/// Logs size-limit termination without exposing engine internals to algorithms.
+fn log_size_limit_reached(
+    current_size: usize,
+    original_size: usize,
+    target_bytes: Option<usize>,
+    target_percent: Option<u32>,
+) {
+    let byte_part = target_bytes
+        .map(|bytes| format!("{bytes} bytes"))
+        .unwrap_or_else(|| "disabled".to_owned());
+    let percent_part = target_percent
+        .map(|percent| format!("{percent}%"))
+        .unwrap_or_else(|| "disabled".to_owned());
+    crate::logging::info(format_args!(
+        "size stop target reached: current={} bytes, original={} bytes, target_size={}, target_percent={}",
+        current_size, original_size, byte_part, percent_part
+    ));
 }

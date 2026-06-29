@@ -76,6 +76,9 @@ pub(super) fn run_rename_sweep(
                     report.rejected += 1;
                     context.record_rejected_attempt();
                 }
+                TrialAttempt::Interrupted => {
+                    break;
+                }
             }
         }
 

@@ -83,9 +83,9 @@ fn java_group_config(
     Some(match stage {
         StageKind::AggressiveFunctionElimination => (
             CandidateGroupKind::DeclarationFamily,
-            GroupStrategy::WholeThenChunksThenSingles,
-            280,
-            "Java function and type declaration simplifications",
+            GroupStrategy::SinglesOnly,
+            150,
+            "Java unreferenced function and type declaration simplifications",
         ),
         StageKind::AggressiveBlockElimination => (
             CandidateGroupKind::ControlPathSet,
@@ -158,6 +158,7 @@ fn java_candidates_for_stage(parsed: &ParsedProgram, stage: StageKind) -> Vec<Ca
                 if !(node.kind == "class_declaration"
                     && is_public_class(node)
                     && public_top_level_class_count <= 1)
+                    && !should_skip_referenced_declaration(parsed, node)
                 {
                     push_delete(
                         &mut candidates,
@@ -922,6 +923,26 @@ mod tests {
                 .diagnostics
                 .is_empty(),
             "Deleting a nested empty block statement should preserve parse validity"
+        );
+    }
+
+    #[test]
+    fn java_function_stage_skips_referenced_top_level_types() {
+        let adapter = JavaAdapter::new();
+        let source = "public class Test { Helper h; } class Helper {}\n";
+        let parsed = adapter.parse(source, "Test.java").unwrap();
+        let candidates =
+            candidates_for_stage(&adapter, &parsed, StageKind::AggressiveFunctionElimination);
+
+        assert!(
+            candidates.iter().all(|candidate| {
+                candidate.description != "Delete top-level type declaration"
+                    || !matches!(
+                        &candidate.edit,
+                        Edit::Delete(range) if source[range.start..range.end].contains("class Helper")
+                    )
+            }),
+            "Referenced top-level helper types should not be aggressive declaration-deletion candidates"
         );
     }
 }

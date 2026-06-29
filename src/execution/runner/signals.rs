@@ -9,7 +9,7 @@ use std::{
     process::{Child, Command},
     sync::{
         LazyLock, Mutex, Once,
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
     },
     thread,
     time::Duration,
@@ -31,6 +31,9 @@ static SIGNAL_INSTALL: Once = Once::new();
 
 /// Last shutdown signal observed by the async signal handler.
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// Ensures the monitor performs shutdown cleanup only once.
+static SHUTDOWN_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Registration guard for one running shell command.
 pub(super) struct ActiveProcessGuard {
@@ -62,18 +65,31 @@ pub fn install_signal_handlers() {
         install_platform_signal_handlers();
         thread::spawn(|| {
             loop {
-                let signal = RECEIVED_SIGNAL.load(Ordering::SeqCst);
-                if signal != 0 {
+                if let Some(signal) = received_signal() {
+                    if SHUTDOWN_CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
                     logging::error(format_args!(
-                        "received signal {signal}; terminating active child processes before exit"
+                        "received signal {signal}; terminating active child processes before graceful shutdown"
                     ));
                     terminate_active_processes_for_shutdown();
-                    std::process::exit(128 + signal);
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         });
     });
+}
+
+/// Returns the first shutdown signal observed by the process, if any.
+pub fn received_signal() -> Option<i32> {
+    let signal = RECEIVED_SIGNAL.load(Ordering::SeqCst);
+    (signal != 0).then_some(signal)
+}
+
+/// Returns the conventional process exit code for a Unix-style signal.
+pub fn signal_exit_code(signal: i32) -> i32 {
+    128 + signal
 }
 
 /// Sends SIGTERM to all active command process groups, then SIGKILL after a grace period.
@@ -140,7 +156,7 @@ fn install_platform_signal_handlers() {}
 
 /// Async signal handler; it only stores the signal number.
 extern "C" fn handle_signal(signal: i32) {
-    RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
+    let _ = RECEIVED_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Sends SIGTERM to process groups on Unix.

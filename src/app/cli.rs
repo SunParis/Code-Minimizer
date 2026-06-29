@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::{
     BuildConfig, DiffMode, PreserveExit, ReduceConfig, ReducerLimits, ReductionAlgorithm,
-    parse_duration,
+    SizeStopConfig, parse_byte_size, parse_duration, parse_size_percent,
 };
 
 /// Top-level CLI parser.
@@ -114,6 +114,14 @@ pub struct ReduceArgs {
     /// Maximum oracle trials after baseline validation. Use 0 for no explicit limit.
     #[arg(long, default_value_t = 2000)]
     pub max_trials: usize,
+
+    /// Stop once the accepted source is at or below this size, for example 512B, 10KB, 2MB, or 1GB.
+    #[arg(long)]
+    pub stop_size: Option<String>,
+
+    /// Stop once the accepted source is at or below this percentage of the original size.
+    #[arg(long)]
+    pub stop_size_percent: Option<String>,
 }
 
 impl ReduceArgs {
@@ -126,6 +134,14 @@ impl ReduceArgs {
         // Parse the algorithm before constructing the config so CLI errors are
         // reported with the rest of the user-facing validation failures.
         let algorithm = ReductionAlgorithm::parse(&self.algorithm)?;
+        let stop_size = SizeStopConfig {
+            bytes: self.stop_size.as_deref().map(parse_byte_size).transpose()?,
+            percent: self
+                .stop_size_percent
+                .as_deref()
+                .map(parse_size_percent)
+                .transpose()?,
+        };
         let limits = ReducerLimits {
             max_rounds: if self.max_rounds == 0 {
                 usize::MAX
@@ -137,6 +153,7 @@ impl ReduceArgs {
             } else {
                 self.max_trials
             },
+            stop_size,
         };
 
         ReduceConfig::new(
