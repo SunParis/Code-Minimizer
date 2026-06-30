@@ -42,7 +42,8 @@ round/trial `0` 转成 `usize::MAX`，表示不设置显式上限。
 - `bytes`：当 accepted source 小于等于该 byte count 时停止；
 - `percent`：当 accepted/original size 小于等于该整数百分比时停止。
 
-如果两个条件都配置，任意一个达到都会停止继续调度 candidate。最终输出写入和最终 oracle confirmation 仍会执行。
+如果两个条件都配置，任意一个达到都会停止继续调度 candidate。共享的最终 `BlankLineCleanup` 阶段、最终输出写入和最终
+oracle confirmation 仍会执行。
 
 `config::parse_byte_size()` 支持纯 bytes 和 `B`、`KB`、`MB`、`GB` 后缀。
 `config::parse_size_percent()` 支持 `50` 或 `50%` 形式的整数百分比。
@@ -350,8 +351,8 @@ candidate 数据类型位于 `reducer::model`；candidate planning、retarget、
 oracle trial、accepted-source 更新、limit 检查和 stage report 记录。
 
 limit 检查集中在 `ReductionContext`。算法用于检查 `max_trials` 的同一停止检查也会基于当前 accepted snapshot
-检查配置的 size target。size target 达到后，算法停止调度新的候选，engine 继续执行最终写出和最终 oracle
-confirmation。
+检查配置的 size target。size target 达到后，算法停止调度新的候选，engine 仍会先执行共享的最终 `BlankLineCleanup`
+阶段，然后执行最终写出和最终 oracle confirmation。
 
 ## 算法
 
@@ -381,7 +382,9 @@ pub trait ReducerAlgorithm {
 final one-minimal sweep 会复用这些阶段，但强制使用 single-candidate attempt。
 
 所有算法专属工作结束后，`BlankLineCleanup` 会逐个尝试删除空白行和只有空白的行。每个 candidate 仍然会经过解析和
-oracle 检查；被拒绝时当前 accepted source 不变。
+oracle 检查；被拒绝时当前 accepted source 不变。如果 cleanup pass 改动了 source，engine 会在写出前额外做一次
+whole-source confirmation。若这次 confirmation 失败，reducer 会恢复到 `BlankLineCleanup` 开始前已经 accepted
+的 source。
 
 ## Report 格式
 

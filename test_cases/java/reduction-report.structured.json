@@ -1,0 +1,71 @@
+{
+  "input_path": "/home/syc/Desktop/code/Code-Minimizer/test_cases/java/Test.java",
+  "output_path": "/home/syc/Desktop/code/Code-Minimizer/test_cases/java/Test.min.structured.java",
+  "language": "java",
+  "algorithm": "structured",
+  "original_size": 137256,
+  "final_size": 34195,
+  "total_trials": 2589,
+  "accepted_trials": 253,
+  "rejected_trials": 11068,
+  "cache_hits": 366,
+  "max_rounds": 8,
+  "max_trials": 18446744073709551615,
+  "stop_size_bytes": null,
+  "stop_size_percent": 25,
+  "confirm_runs": 1,
+  "timeout_ms": 120000,
+  "max_output_bytes": 1048576,
+  "baseline_diff": {
+    "stdout_differs": true,
+    "stderr_differs": false,
+    "exit_differs": true
+  },
+  "final_diff": {
+    "stdout_differs": true,
+    "stderr_differs": false,
+    "exit_differs": true
+  },
+  "stages": [
+    {
+      "round": 1,
+      "stage": "RuntimeCostReduction",
+      "generated_candidates": 9320,
+      "trials": 311,
+      "accepted": 39,
+      "rejected": 641,
+      "size_before": 137256,
+      "size_after": 137123,
+      "runtime_cost_before": 33891,
+      "runtime_cost_after": 33733
+    },
+    {
+      "round": 1,
+      "stage": "AggressiveFunctionElimination",
+      "generated_candidates": 117876,
+      "trials": 369,
+      "accepted": 100,
+      "rejected": 7531,
+      "size_before": 137123,
+      "size_after": 130694,
+      "runtime_cost_before": 33733,
+      "runtime_cost_after": 32338
+    },
+    {
+      "round": 1,
+      "stage": "AggressiveBlockElimination",
+      "generated_candidates": 121644,
+      "trials": 1909,
+      "accepted": 114,
+      "rejected": 2896,
+      "size_before": 130694,
+      "size_after": 34195,
+      "runtime_cost_before": 32338,
+      "runtime_cost_after": 6243
+    }
+  ],
+  "trial_limit_reached": false,
+  "size_limit_reached": true,
+  "interrupted_by_signal": null,
+  "kept_temp_dir": null
+}

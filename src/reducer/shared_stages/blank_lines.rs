@@ -27,7 +27,7 @@ pub fn run_final_blank_line_cleanup(
     // shifts byte offsets. Rebuilding the snapshot and recomputing candidates
     // keeps all following edit ranges tied to the current accepted source.
     loop {
-        if context.trial_limit_reached() {
+        if context.hard_stop_reached() {
             break;
         }
 
@@ -41,7 +41,7 @@ pub fn run_final_blank_line_cleanup(
         let mut accepted = None;
 
         for candidate in candidates {
-            if context.trial_limit_reached() {
+            if context.hard_stop_reached() {
                 break;
             }
 

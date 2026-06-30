@@ -141,6 +141,116 @@ fn final_blank_line_cleanup_runs_after_structured_algorithm() {
 }
 
 #[test]
+fn final_blank_line_cleanup_still_runs_after_size_stop() {
+    let source = "function main() {\n  let keep = 1;\n\n   \n  console.log(keep);\n}\nmain();\n";
+    let (_dir, mut config) = fixture_config("js", "blank-lines-size-stop.js", source);
+    config.limits.stop_size = SizeStopConfig {
+        bytes: Some(source.len()),
+        percent: None,
+    };
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Final cleanup should still shrink source after the size stop is already satisfied"
+    );
+    assert!(
+        !minimized.lines().any(|line| line.trim().is_empty()),
+        "Size stop should not skip the final shared blank-line cleanup"
+    );
+}
+
+#[test]
+fn final_blank_line_cleanup_still_runs_after_size_stop_for_weighted_random() {
+    let source = "function main() {\n  let keep = 1;\n\n   \n  console.log(keep);\n}\nmain();\n";
+    let (_dir, mut config) = fixture_config("js", "blank-lines-size-stop-weighted.js", source);
+
+    // The target is already satisfied before the weighted-random scheduler
+    // starts. This catches regressions where the optional size stop prevents
+    // the engine-owned final cleanup from removing blank and whitespace-only
+    // lines after an algorithm exits early.
+    config.limits.stop_size = SizeStopConfig {
+        bytes: Some(source.len()),
+        percent: None,
+    };
+    let config = config.with_algorithm(ReductionAlgorithm::WeightedRandom);
+    let output = config.output_path.clone();
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+
+    assert!(
+        summary.final_size < summary.original_size,
+        "Weighted random final cleanup should still shrink source after the size stop is already satisfied"
+    );
+    assert!(
+        !minimized.lines().any(|line| line.trim().is_empty()),
+        "Size stop should not skip weighted random's final shared blank-line cleanup"
+    );
+}
+
+#[test]
+fn final_blank_line_cleanup_rolls_back_when_stage_confirmation_fails() {
+    let source = "function main() {\n  console.log(1);\n\n}\nmain();\n";
+    let (dir, mut config) = fixture_config("js", "blank-lines-rollback.js", source);
+    let output = config.output_path.clone();
+    let report_path = dir.path().join("blank-lines-rollback-report.json");
+    let cleaned_counter = dir.path().join("blank-line-cleaned-count");
+    let cleaned_counter_arg = cleaned_counter.to_string_lossy();
+    let stateful_run = format!(
+        r#"if ! grep -q 'function main' {{input}} || ! grep -q 'console.log(1)' {{input}} || ! grep -q 'main();' {{input}}; then printf reject; exit 0; fi; blank=$(grep -c '^[[:space:]]*$' {{input}}); if [ "$blank" -eq 0 ]; then cleaned=$(cat "{cleaned_counter_arg}" 2>/dev/null || echo 0); cleaned=$((cleaned + 1)); printf '%s' "$cleaned" > "{cleaned_counter_arg}"; if [ "$cleaned" -eq 1 ]; then printf interesting; else printf reject; fi; else printf interesting; fi"#
+    );
+
+    // The oracle accepts the individual blank-line deletion while the final
+    // cleanup confirmation deliberately rejects the fully cleaned source. This
+    // models a rare non-monotonic or stateful oracle and verifies that the
+    // engine restores the source accepted before the cleanup stage.
+    config.run_a = stateful_run;
+    config.run_b = "printf reject".to_owned();
+    config.limits.max_rounds = 0;
+    config.json_report_path = Some(report_path.clone());
+
+    let mut engine = ReducerEngine::new(config).unwrap();
+    let summary = engine.reduce().unwrap();
+    let minimized = fs::read_to_string(output).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
+
+    assert_eq!(
+        minimized, source,
+        "Rejected final blank-line cleanup should roll back to the pre-cleanup accepted source"
+    );
+    assert_eq!(
+        summary.final_size,
+        source.len(),
+        "Summary should report the restored source size after rollback"
+    );
+    assert!(
+        summary.rejected_trials > 0,
+        "The stage-level confirmation rejection should be reported"
+    );
+    let blank_line_report = report["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["stage"] == "BlankLineCleanup")
+        .unwrap();
+    assert_eq!(
+        blank_line_report["accepted"], 0,
+        "Rolled-back cleanup should not remain reported as accepted"
+    );
+    assert!(
+        blank_line_report["rejected"].as_u64().unwrap() > 0,
+        "Rolled-back cleanup should be reflected as rejected in the stage report"
+    );
+}
+
+#[test]
 fn size_stop_target_stops_after_reaching_requested_bytes() {
     let source = r#"
 function unused() {

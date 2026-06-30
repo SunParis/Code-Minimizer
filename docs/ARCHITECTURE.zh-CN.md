@@ -162,7 +162,7 @@ pass。
 
 所有算法都通过 `ReductionContext` 做停止检查。同一个检查覆盖 `--max-trials`、`--stop-size` 和
 `--stop-size-percent`。size target 达到后，算法会停止请求更多 candidate；engine 仍会写出当前 accepted
-source，并执行最终 oracle confirmation。
+source，并在共享的最终 `BlankLineCleanup` 阶段后执行最终 oracle confirmation。
 
 ## Structured Stage
 
@@ -180,7 +180,9 @@ source，并执行最终 oracle confirmation。
 
 `BlankLineCleanup` 是所有算法共享的最终阶段，不由语言 adapter 生成。engine 会为每个空白行和只有空白的行创建
 byte-range candidate，逐个尝试删除，并且只有在解析验证和 oracle 都确认配置的差异仍然存在时才接受。被拒绝的
-空白行删除不会改变当前 accepted snapshot。
+空白行删除不会改变当前 accepted snapshot。如果接受过任何空白行删除，engine 会对完成后的 cleanup stage 再运行一次
+whole-source confirmation；如果这次被拒绝，就恢复到 `BlankLineCleanup` 开始前的 snapshot，并同步重写 workspace
+中的 accepted source。
 
 普通固定点轮次只在该轮没有接受任何候选时停止。engine 不使用源码字节数作为固定点信号，因为有些结构化简会保持相同
 byte size，但会打开后续候选。

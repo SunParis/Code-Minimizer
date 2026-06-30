@@ -31,5 +31,6 @@ cargo run --manifest-path "${REPO_ROOT}/Cargo.toml" -- reduce \
   --max-trials 0 \
   --algorithm weighted-random \
   --stop-size-percent 25 \
+  --keep-temp \
   --json-report "${SCRIPT_DIR}/reduction-report.weighted-random.json"
 

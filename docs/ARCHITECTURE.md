@@ -204,7 +204,8 @@ long-name rename passes.
 All algorithms use `ReductionContext` for stop checks. The same check covers
 `--max-trials`, `--stop-size`, and `--stop-size-percent`. When a size target is
 reached, the algorithm stops requesting more candidates; the engine still writes
-the current accepted source and performs final oracle confirmation.
+the current accepted source and performs final oracle confirmation after the
+shared final `BlankLineCleanup` stage.
 
 ## Structured Stages
 
@@ -227,7 +228,10 @@ by language adapters. The engine creates byte-range candidates for blank and
 whitespace-only lines, tries them one at a time, and accepts a deletion only
 after parse validation and the oracle confirm that the configured difference is
 still present. A rejected blank-line deletion leaves the previous accepted
-snapshot current.
+snapshot current. If any blank-line deletion is accepted, the engine then runs
+one whole-source confirmation for the completed cleanup stage. A rejection there
+restores the snapshot that was current before `BlankLineCleanup` began and
+rewrites the workspace's accepted source accordingly.
 
 A normal fixed-point round stops only when no candidate is accepted in that
 round. The engine does not use source byte length as the fixed-point signal,

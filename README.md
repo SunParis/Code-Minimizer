@@ -159,8 +159,9 @@ snapshot before generating more candidates.
 Reducer limits are checked against the current accepted snapshot. `--max-trials`
 limits oracle work, while `--stop-size` and `--stop-size-percent` are optional
 target-size stop conditions. If any configured size target is reached, the
-reducer stops scheduling new candidates, writes the current accepted source, and
-still runs the final oracle confirmation.
+reducer stops scheduling algorithm candidates but still runs the shared final
+`BlankLineCleanup` stage before writing output and running final oracle
+confirmation.
 
 The reducer has pluggable scheduling algorithms. The default `structured`
 algorithm runs fixed-point stages in this order:
@@ -191,7 +192,10 @@ After the selected algorithm finishes, the engine always runs `BlankLineCleanup`
 as the last stage. It tries to delete blank and whitespace-only lines one at a
 time. Each deletion is parsed and checked by the oracle like any other
 candidate; if the configured difference is not preserved, the previous accepted
-source remains current.
+source remains current. After all blank-line candidates finish, the engine runs
+one additional whole-source confirmation. If that confirmation fails, the whole
+blank-line cleanup stage is rolled back to the source accepted immediately
+before the stage started.
 
 The experimental `weighted-random` algorithm reuses the same parser, candidate
 generators, oracle, cache, workspace, and reports. It collects deletable

@@ -180,10 +180,40 @@ impl ReducerEngine {
             "reduction algorithm: {}",
             self.config.algorithm.as_str()
         ));
-        let mut context = ReductionContext::new(self, &workspace, &oracle, &mut state, &mut report);
-        algorithm_for(self.config.algorithm).run(&mut context)?;
-        if !context.trial_limit_reached() {
-            run_final_blank_line_cleanup(&mut context, 1)?;
+        {
+            let mut context =
+                ReductionContext::new(self, &workspace, &oracle, &mut state, &mut report);
+            algorithm_for(self.config.algorithm).run(&mut context)?;
+        }
+        {
+            let mut context =
+                ReductionContext::new(self, &workspace, &oracle, &mut state, &mut report);
+            let before_cleanup = context.current().source.clone();
+            let before_cleanup_runtime_cost = context.current().score.runtime_cost_total;
+            let before_cleanup_diff = context.final_diff().clone();
+            let before_cleanup_accepted_total = context.accepted_total();
+            let hard_stop_reached = context.hard_stop_reached();
+            if !hard_stop_reached {
+                run_final_blank_line_cleanup(&mut context, 1)?;
+            }
+            drop(context);
+
+            if hard_stop_reached {
+                // Signals and the absolute trial cap prohibit starting any more
+                // oracle work. The last accepted source remains current.
+            } else {
+                self.confirm_or_rollback_final_cleanup(
+                    &workspace,
+                    &oracle,
+                    &mut state,
+                    &mut report,
+                    &file_name,
+                    before_cleanup,
+                    before_cleanup_runtime_cost,
+                    before_cleanup_diff,
+                    before_cleanup_accepted_total,
+                )?;
+            }
         }
 
         fs::write(&self.config.output_path, &state.current.source).with_context(|| {
@@ -243,6 +273,228 @@ impl ReducerEngine {
         }
 
         self.finish_report(workspace, state, report)
+    }
+
+    /// Confirms the whole engine-owned final cleanup and restores the pre-cleanup source on failure.
+    fn confirm_or_rollback_final_cleanup(
+        &self,
+        workspace: &SessionWorkspace,
+        oracle: &Oracle,
+        state: &mut EngineState,
+        report: &mut ReductionReport,
+        file_name: &str,
+        before_cleanup_source: String,
+        before_cleanup_runtime_cost: u64,
+        before_cleanup_diff: crate::output_diff::OutputDiff,
+        before_cleanup_accepted_total: usize,
+    ) -> anyhow::Result<()> {
+        // Each blank-line candidate is already validated on its own, but the
+        // final cleanup is the last stage before output. A separate whole-source
+        // confirmation gives the stage the same safety net as normal candidate
+        // rollback: if a flaky or stateful oracle rejects the cleaned source, the
+        // reducer writes the exact snapshot that was accepted before cleanup.
+        if state.current.source == before_cleanup_source {
+            return Ok(());
+        }
+
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            logging::info(format_args!(
+                "final blank-line cleanup confirmation skipped after shutdown signal {signal}; rolling back to previous accepted source"
+            ));
+            self.mark_final_blank_line_cleanup_rolled_back(
+                report,
+                before_cleanup_runtime_cost,
+                before_cleanup_source.len(),
+                false,
+            );
+            state.accepted_total = before_cleanup_accepted_total;
+            return self.rollback_final_cleanup(
+                workspace,
+                state,
+                file_name,
+                before_cleanup_source,
+                before_cleanup_diff,
+            );
+        }
+        if self.trial_limit_reached(state.trial_id) {
+            state.stopped_by_trial_limit = true;
+            logging::info(format_args!(
+                "final blank-line cleanup needs confirmation but max trials is already reached; rolling back to previous accepted source"
+            ));
+            self.mark_final_blank_line_cleanup_rolled_back(
+                report,
+                before_cleanup_runtime_cost,
+                before_cleanup_source.len(),
+                false,
+            );
+            state.accepted_total = before_cleanup_accepted_total;
+            return self.rollback_final_cleanup(
+                workspace,
+                state,
+                file_name,
+                before_cleanup_source,
+                before_cleanup_diff,
+            );
+        }
+
+        state.trial_id += 1;
+        let current_trial_id = state.trial_id;
+        let decision = match oracle.evaluate_candidate(
+            workspace,
+            &state.current.source,
+            current_trial_id,
+            &state.baseline,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                if let Some(signal) = received_signal() {
+                    state.interrupted_by_signal = Some(signal);
+                    logging::info(format_args!(
+                        "shutdown signal {signal} observed during final blank-line cleanup confirmation; rolling back to previous accepted source"
+                    ));
+                    self.mark_final_blank_line_cleanup_rolled_back(
+                        report,
+                        before_cleanup_runtime_cost,
+                        before_cleanup_source.len(),
+                        false,
+                    );
+                    state.accepted_total = before_cleanup_accepted_total;
+                    return self.rollback_final_cleanup(
+                        workspace,
+                        state,
+                        file_name,
+                        before_cleanup_source,
+                        before_cleanup_diff,
+                    );
+                }
+                logging::info(format_args!(
+                    "final blank-line cleanup confirmation failed to run; rolling back to previous accepted source: {error}"
+                ));
+                self.mark_final_blank_line_cleanup_rolled_back(
+                    report,
+                    before_cleanup_runtime_cost,
+                    before_cleanup_source.len(),
+                    false,
+                );
+                state.accepted_total = before_cleanup_accepted_total;
+                return self.rollback_final_cleanup(
+                    workspace,
+                    state,
+                    file_name,
+                    before_cleanup_source,
+                    before_cleanup_diff,
+                );
+            }
+        };
+        if let Some(signal) = received_signal() {
+            state.interrupted_by_signal = Some(signal);
+            logging::info(format_args!(
+                "shutdown signal {signal} observed after final blank-line cleanup confirmation; rolling back to previous accepted source"
+            ));
+            self.mark_final_blank_line_cleanup_rolled_back(
+                report,
+                before_cleanup_runtime_cost,
+                before_cleanup_source.len(),
+                false,
+            );
+            state.accepted_total = before_cleanup_accepted_total;
+            return self.rollback_final_cleanup(
+                workspace,
+                state,
+                file_name,
+                before_cleanup_source,
+                before_cleanup_diff,
+            );
+        }
+
+        if decision.accepted {
+            if let Some(diff) = decision.diff {
+                state.final_diff = diff;
+            }
+            logging::info(format_args!(
+                "final blank-line cleanup confirmed by trial {current_trial_id}"
+            ));
+            return Ok(());
+        }
+
+        let reason = decision
+            .reason
+            .unwrap_or_else(|| "final blank-line cleanup was not interesting".to_owned());
+        logging::info(format_args!(
+            "final blank-line cleanup rejected by trial {current_trial_id}; rolling back to previous accepted source: {reason}"
+        ));
+        self.mark_final_blank_line_cleanup_rolled_back(
+            report,
+            before_cleanup_runtime_cost,
+            before_cleanup_source.len(),
+            true,
+        );
+        state.accepted_total = before_cleanup_accepted_total;
+        state.rejected_total += 1;
+        self.rollback_final_cleanup(
+            workspace,
+            state,
+            file_name,
+            before_cleanup_source,
+            before_cleanup_diff,
+        )
+    }
+
+    /// Adjusts the last blank-line stage report when the whole final cleanup is rolled back.
+    fn mark_final_blank_line_cleanup_rolled_back(
+        &self,
+        reduction_report: &mut ReductionReport,
+        restored_runtime_cost: u64,
+        restored_size: usize,
+        include_confirmation_rejection: bool,
+    ) {
+        // The cleanup pass records accepted single-line trials as they happen.
+        // If the later whole-stage confirmation rejects the cleaned source, the
+        // kept output is the pre-cleanup snapshot, so none of the cleanup pass
+        // reports should claim that accepted line deletions survived.
+        let mut last_cleanup_index = None;
+        for (index, report) in reduction_report
+            .stages
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, report)| report.stage == StageKind::BlankLineCleanup)
+        {
+            last_cleanup_index = Some(index);
+            report.rejected += report.accepted;
+            report.accepted = 0;
+            report.size_after = restored_size;
+            report.runtime_cost_after = restored_runtime_cost;
+        }
+        if include_confirmation_rejection {
+            if let Some(index) = last_cleanup_index {
+                reduction_report.stages[index].rejected += 1;
+            }
+        }
+    }
+
+    /// Restores the snapshot that was current before final blank-line cleanup.
+    fn rollback_final_cleanup(
+        &self,
+        workspace: &SessionWorkspace,
+        state: &mut EngineState,
+        file_name: &str,
+        before_cleanup_source: String,
+        before_cleanup_diff: crate::output_diff::OutputDiff,
+    ) -> anyhow::Result<()> {
+        // Rollback creates a fresh snapshot id instead of trying to reuse the
+        // old one. Candidate ranges from the cleanup stage are no longer used,
+        // and a monotonic id keeps later diagnostics simple.
+        state.current =
+            self.build_snapshot(state.next_snapshot, before_cleanup_source, file_name)?;
+        reject_invalid_snapshot(
+            &state.current,
+            "Rollback source before final blank-line cleanup became unparsable",
+        )?;
+        state.next_snapshot = state.next_snapshot.next();
+        state.final_diff = before_cleanup_diff;
+        workspace.write_accepted(&state.current.file_name, &state.current.source)?;
+        Ok(())
     }
 
     /// Finalizes output metadata and writes the optional JSON report.

@@ -48,7 +48,8 @@ Exit status is controlled separately by `config::PreserveExit`.
   percentage.
 
 If both are configured, reaching either target stops further candidate
-scheduling. Final output writing and final oracle confirmation still run.
+scheduling. The shared final `BlankLineCleanup` stage, final output writing, and
+final oracle confirmation still run.
 
 `config::parse_byte_size()` accepts plain bytes and `B`, `KB`, `MB`, or `GB`
 suffixes. `config::parse_size_percent()` accepts whole percentages written as
@@ -405,8 +406,8 @@ accepted-source updates, limit checks, and stage report recording.
 Limit checks are centralized in `ReductionContext`. Algorithms call the same
 stop check they use for `max_trials`; it also observes configured size targets
 against the current accepted snapshot. When a size target is reached, algorithms
-stop scheduling new candidates and the engine proceeds to final write and final
-oracle confirmation.
+stop scheduling new candidates and the engine still runs the shared final
+`BlankLineCleanup` stage before final write and final oracle confirmation.
 
 ## Algorithms
 
@@ -442,7 +443,10 @@ attempts.
 After any algorithm-specific work, `BlankLineCleanup` tries blank and
 whitespace-only line deletions one at a time. Each candidate is still parsed and
 checked by the oracle; rejection means the current accepted source is left
-unchanged.
+unchanged. When the cleanup pass has changed the source, the engine performs one
+extra whole-source confirmation before output is written. If that confirmation
+fails, the reducer restores the source that was accepted immediately before
+`BlankLineCleanup` started.
 
 ## Report Format
 

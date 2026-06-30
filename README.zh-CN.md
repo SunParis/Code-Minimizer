@@ -137,7 +137,7 @@ reducer 都会重新构建 snapshot，然后再生成后续候选。
 
 reducer limit 会基于当前 accepted snapshot 检查。`--max-trials` 限制 oracle 工作量；`--stop-size` 和
 `--stop-size-percent` 是可选的目标大小停止条件。只要任一 size target 达到，reducer 就停止调度新的候选，
-写出当前 accepted source，并仍然执行最终 oracle confirmation。
+但仍会先执行共享的最终 `BlankLineCleanup` 阶段，然后写出当前 accepted source 并执行最终 oracle confirmation。
 
 reducer 的候选调度算法是可插拔的。默认 `structured` 算法会按固定点轮次执行以下阶段：
 
@@ -160,7 +160,8 @@ single-candidate group 单独尝试，并且只有在没有精确外部 call sit
 
 所选算法结束后，engine 一定会把 `BlankLineCleanup` 作为最后阶段运行。它会逐个尝试删除空白行和只有空白的行。
 每次删除都和普通 candidate 一样经过解析和 oracle 验证；如果配置的差异 `D` 没有保持，当前 accepted source
-不会改变，也就是自动回滚。
+不会改变，也就是自动回滚。如果这个 cleanup pass 改动过源码，engine 还会额外运行一次 whole-source
+confirmation；如果这次确认失败，整个空白行 cleanup 阶段都会回滚到该阶段开始前已经 accepted 的源码。
 
 实验性的 `weighted-random` 算法复用同一套 parser、candidate generator、oracle、cache、workspace 和 report。
 它会把可删除 statement candidate 收集成带权重点，按当前权重随机选择一个点并测试删除。invalid edit、parse

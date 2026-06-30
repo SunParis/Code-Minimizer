@@ -9,6 +9,7 @@ use crate::{
     config::ReduceConfig,
     ir::{ProgramSnapshot, SnapshotId},
     oracle::Oracle,
+    output_diff::OutputDiff,
     report::{ReductionReport, StageReport},
     runner::received_signal,
     workspace::SessionWorkspace,
@@ -65,6 +66,16 @@ impl<'a> ReductionContext<'a> {
         &self.state.current
     }
 
+    /// Returns the latest diff known for the current accepted snapshot.
+    pub(super) fn final_diff(&self) -> &OutputDiff {
+        &self.state.final_diff
+    }
+
+    /// Returns how many candidate attempts have been accepted so far.
+    pub(super) fn accepted_total(&self) -> usize {
+        self.state.accepted_total
+    }
+
     /// Replaces the current snapshot after an algorithm accepts a returned trial.
     pub fn set_current(&mut self, snapshot: ProgramSnapshot) -> anyhow::Result<()> {
         // Algorithms receive accepted snapshots from `try_group` or
@@ -110,6 +121,30 @@ impl<'a> ReductionContext<'a> {
                 );
             }
             self.state.stopped_by_size_limit = true;
+            return true;
+        }
+
+        false
+    }
+
+    /// Returns true when no more oracle work may be started at all.
+    pub fn hard_stop_reached(&mut self) -> bool {
+        // Final cleanup stages should still run after an optional size target is
+        // reached, because the user asked for those byte-only cleanups to be the
+        // last stage of every algorithm. Hard stops are only process shutdown
+        // signals and the absolute max-trials bound.
+        if let Some(signal) = self.state.interrupted_by_signal {
+            self.record_signal_interrupt(signal);
+            return true;
+        }
+
+        if let Some(signal) = received_signal() {
+            self.record_signal_interrupt(signal);
+            return true;
+        }
+
+        if self.engine.trial_limit_reached(self.state.trial_id) {
+            self.state.stopped_by_trial_limit = true;
             return true;
         }
 
